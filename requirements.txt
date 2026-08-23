@@ -32,3 +32,5 @@ psycopg2-binary
 passlib[bcrypt]
 python-jose[cryptography]
 python-multipart
+
+lxml_html_clean>=0.4.2
