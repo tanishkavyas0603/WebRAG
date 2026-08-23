@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual Environments
+.venv/
+venv/
+ragbot/
+
+# Environment Variables
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# Generated RAG / ML Data
+data/index/
+*.faiss
+*.pkl
+
+# HuggingFace / ML cache
+.cache/
+huggingface/
+hf_cache/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+webrag.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Log
+logs/
+*.log
+
+# Testing
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
