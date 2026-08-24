@@ -5,6 +5,8 @@ import numpy as np
 
 @pytest.fixture(autouse=True)
 def mock_hf_inference(monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "HF_TOKEN", "dummy_token_for_tests")
     original_client_post = httpx.Client.post
 
     def mocked_post(self, url, *args, **kwargs):

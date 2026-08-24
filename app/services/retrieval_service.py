@@ -1,4 +1,6 @@
 import numpy as np
+import threading
+from collections import defaultdict
 from app.services.embedding_service import EmbeddingService
 
 from app.core.config import settings
@@ -8,8 +10,12 @@ from app.services.bm25_service import BM25Service
 from app.services.metadata_ranker import MetadataRanker
 from app.services.query_expansion_service import ExpandedQuery, QueryExpansionService
 from app.vectorstore.faiss_store import FAISSVectorStore
+from app.core.database import SessionLocal
+from app.models.db import Chunk
 
 logger = get_logger(__name__)
+
+_recovery_locks = defaultdict(threading.Lock)
 
 _MIN_COSINE_THRESHOLD = 0.15
 
@@ -21,7 +27,14 @@ class RetrievalService:
         self.store = FAISSVectorStore(document_id)
         self.index, self.metadata = self.store.load()
         if self.index is None:
-            raise RuntimeError(f"FAISS index not found for document {document_id}")
+            with _recovery_locks[document_id]:
+                # Check again in case another thread just built it
+                self.index, self.metadata = self.store.load()
+                if self.index is None:
+                    self._recover_faiss_index()
+                    self.index, self.metadata = self.store.load()
+                    if self.index is None:
+                        raise RuntimeError(f"FAISS index recovery failed for document {document_id}")
 
         self.bm25 = BM25Service(document_id)
         self.bm25.load()
@@ -30,6 +43,40 @@ class RetrievalService:
         self.metadata_ranker = MetadataRanker()
 
         self._fetch_k = settings.TOP_K * settings.RETRIEVAL_MULTIPLIER
+
+    def _recover_faiss_index(self):
+        logger.warning(f"[FAISS_RECOVERY] Index missing for document {self.document_id}")
+        logger.info("[FAISS_RECOVERY] Loading chunks from database")
+        
+        with SessionLocal() as db:
+            chunks = db.query(Chunk).filter(Chunk.document_id == self.document_id).order_by(Chunk.chunk_index).all()
+            
+        if not chunks:
+            logger.error(f"[FAISS_RECOVERY] No chunks found for document {self.document_id}")
+            raise RuntimeError(f"Document {self.document_id} needs to be re-ingested. No chunks found.")
+            
+        logger.info(f"[FAISS_RECOVERY] Found {len(chunks)} chunks")
+        logger.info("[FAISS_RECOVERY] Generating embeddings")
+        
+        chunk_dicts = [
+            {
+                "id": c.id,
+                "content": c.content,
+                "title": c.metadata_.get("title", ""),
+                "section": c.metadata_.get("section", ""),
+                "preview": c.metadata_.get("preview", "")
+            }
+            for c in chunks
+        ]
+        
+        embeddings = self.embedding_service.generate_embeddings(chunk_dicts)
+        
+        logger.info("[FAISS_RECOVERY] Building FAISS index")
+        self.store.build(embeddings)
+        self.store.save_metadata(chunk_dicts)
+        
+        logger.info("[FAISS_RECOVERY] FAISS index rebuilt successfully")
+        logger.info("[FAISS_RECOVERY] Continuing retrieval")
 
     def search(self, question: str) -> tuple[list[RetrievalResult], ExpandedQuery, list[float]]:
         expanded = self.expander.expand(question)
