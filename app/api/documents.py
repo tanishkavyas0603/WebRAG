@@ -22,20 +22,28 @@ async def process_document_background(document_id: int, url: str, user_id: int):
     db = SessionLocal()
     document = db.query(Document).filter(Document.id == document_id).first()
     
+    if not document:
+        db.close()
+        return
+
+    logger.info(f"[INGESTION] Starting document {document_id}")
+    
     try:
         # Ingestion
         ingestion_service = DocumentIngestionService(db, user_id, url)
         
+        logger.info("[INGESTION] Fetching URL")
         try:
             html = await ingestion_service.fetch_html()
             clean_text, title = ingestion_service.extract_text(html)
         except Exception as e:
-            logger.error(f"Ingestion failed for {url}: {e}")
+            logger.error(f"[INGESTION] Document {document_id} failed: {e}")
             document.status = "failed"
             document.error_message = str(e)
             db.commit()
-            db.close()
             return
+            
+        logger.info(f"[INGESTION] Extracted content: {len(clean_text)} characters")
 
         document.content = clean_text
         document.title = title[:255]
@@ -45,11 +53,14 @@ async def process_document_background(document_id: int, url: str, user_id: int):
         chunks = chunking_service.run()
         
         if not chunks:
+            error_msg = "No text content found to chunk."
+            logger.error(f"[INGESTION] Document {document_id} failed: {error_msg}")
             document.status = "failed"
-            document.error_message = "No text content found to chunk."
+            document.error_message = error_msg
             db.commit()
-            db.close()
             return
+
+        logger.info(f"[INGESTION] Created {len(chunks)} chunks")
 
         # Prepare for indexing
         chunk_dicts = [
@@ -75,15 +86,26 @@ async def process_document_background(document_id: int, url: str, user_id: int):
         faiss_store.build(embeddings)
         faiss_store.save_metadata(chunk_dicts)
         
+        logger.info("[INGESTION] FAISS index built")
+        
         # Mark as ready
         document.status = "ready"
         db.commit()
-        logger.info(f"Document {document_id} processed successfully.")
+        logger.info(f"[INGESTION] Document {document_id} completed")
+        
     except Exception as e:
-        logger.error(f"Unexpected error processing document {document_id}: {traceback.format_exc()}")
-        document.status = "failed"
-        document.error_message = "An unexpected error occurred during processing."
-        db.commit()
+        logger.error(f"[INGESTION] Document {document_id} failed: {str(e)}\n{traceback.format_exc()}")
+        db.rollback() # Rollback any pending uncommitted changes
+        
+        try:
+            # Refresh document inside this session to mark it as failed
+            document = db.query(Document).filter(Document.id == document_id).first()
+            if document:
+                document.status = "failed"
+                document.error_message = str(e)
+                db.commit()
+        except Exception as inner_e:
+            logger.error(f"[INGESTION] Critical failure updating document status: {str(inner_e)}")
     finally:
         db.close()
 
