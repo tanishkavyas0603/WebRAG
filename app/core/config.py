@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     # External API                                                         #
     # ------------------------------------------------------------------ #
     GROQ_API_KEY: str
+    HF_TOKEN: str | None = None
     WEBRAG_USER_AGENT: str = "WebRAG/1.0 (public webpage research application)"
 
     # ------------------------------------------------------------------ #

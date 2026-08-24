@@ -1,5 +1,5 @@
 import numpy as np
-from app.services.embedding_service import get_embedding_model
+from app.services.embedding_service import EmbeddingService
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -16,7 +16,7 @@ _MIN_COSINE_THRESHOLD = 0.15
 class RetrievalService:
     def __init__(self, document_id: int):
         self.document_id = document_id
-        self.model = get_embedding_model()
+        self.embedding_service = EmbeddingService()
 
         self.store = FAISSVectorStore(document_id)
         self.index, self.metadata = self.store.load()
@@ -51,7 +51,7 @@ class RetrievalService:
         return diverse, expanded, cosine_scores
 
     def _embed(self, text: str) -> np.ndarray:
-        vec = self.model.encode([text], convert_to_numpy=True, normalize_embeddings=True)
+        vec = self.embedding_service.generate_embeddings([text])
         return vec[0]
 
     def _dense_search(self, query_embedding: np.ndarray, k: int) -> list[RetrievalResult]:
@@ -120,7 +120,7 @@ class RetrievalService:
         if len(chunks) <= top_k:
             return chunks
         texts = [c.content for c in chunks]
-        chunk_embeddings = self.model.encode(texts, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+        chunk_embeddings = self.embedding_service.generate_embeddings(texts)
         relevance = chunk_embeddings @ query_embedding
 
         selected_indices = []
