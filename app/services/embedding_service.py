@@ -1,4 +1,3 @@
-from sentence_transformers import SentenceTransformer
 from app.core.config import settings
 from app.core.logging import get_logger
 
