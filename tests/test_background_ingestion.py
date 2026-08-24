@@ -3,8 +3,7 @@ from app.models.db import Document
 from app.api.documents import process_document_background
 from app.core.database import SessionLocal
 
-@pytest.mark.anyio
-async def test_background_ingestion_exception_marks_failed(monkeypatch):
+def test_background_ingestion_exception_marks_failed(monkeypatch):
     db = SessionLocal()
     # Create a dummy document
     doc = Document(user_id=1, url="http://example.com", content_hash="", status="pending")
@@ -22,7 +21,7 @@ async def test_background_ingestion_exception_marks_failed(monkeypatch):
     monkeypatch.setattr("app.api.documents.DocumentIngestionService", MockIngestionService)
     
     # Run the background task
-    await process_document_background(doc_id, "http://example.com", 1)
+    process_document_background(doc_id, "http://example.com", 1)
     
     # Check the database
     db.expire_all()

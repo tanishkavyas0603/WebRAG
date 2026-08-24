@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 import traceback
@@ -17,27 +18,38 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
-async def process_document_background(document_id: int, url: str, user_id: int):
+def process_document_background(document_id: int, url: str, user_id: int):
+    logger.info(f"[INGESTION] BACKGROUND TASK STARTED for document {document_id}")
+    
     # Use a new DB session for background task
-    db = SessionLocal()
-    document = db.query(Document).filter(Document.id == document_id).first()
-    
-    if not document:
-        db.close()
-        return
-
-    logger.info(f"[INGESTION] Starting document {document_id}")
-    
     try:
+        db = SessionLocal()
+    except Exception as e:
+        logger.error(f"[INGESTION] BACKGROUND TASK FAILED creating DB session: {e}\n{traceback.format_exc()}")
+        return
+        
+    try:
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            logger.error(f"[INGESTION] Document {document_id} not found in DB.")
+            db.close()
+            return
+
+        logger.info(f"[INGESTION] Starting document {document_id}")
+        
         # Ingestion
         ingestion_service = DocumentIngestionService(db, user_id, url)
         
-        logger.info("[INGESTION] Fetching URL")
+        logger.info("[INGESTION] Fetching webpage")
+        
+        # Safe async wrapper since background tasks in FastAPI run in threads if defined as 'def'
         try:
-            html = await ingestion_service.fetch_html()
+            html = asyncio.run(ingestion_service.fetch_html())
+            logger.info("[INGESTION] Webpage fetched")
             clean_text, title = ingestion_service.extract_text(html)
+            logger.info("[INGESTION] Text extracted")
         except Exception as e:
-            logger.error(f"[INGESTION] Document {document_id} failed: {e}")
+            logger.error(f"[INGESTION] BACKGROUND TASK FAILED (fetching/extracting): {e}\n{traceback.format_exc()}")
             document.status = "failed"
             document.error_message = str(e)
             db.commit()
@@ -54,13 +66,13 @@ async def process_document_background(document_id: int, url: str, user_id: int):
         
         if not chunks:
             error_msg = "No text content found to chunk."
-            logger.error(f"[INGESTION] Document {document_id} failed: {error_msg}")
+            logger.error(f"[INGESTION] BACKGROUND TASK FAILED: {error_msg}")
             document.status = "failed"
             document.error_message = error_msg
             db.commit()
             return
 
-        logger.info(f"[INGESTION] Created {len(chunks)} chunks")
+        logger.info(f"[INGESTION] Chunks created: {len(chunks)}")
 
         # Prepare for indexing
         chunk_dicts = [
@@ -75,12 +87,15 @@ async def process_document_background(document_id: int, url: str, user_id: int):
         ]
 
         # BM25 Index
+        logger.info("[INGESTION] Building BM25 index")
         bm25_service = BM25Service(document_id)
         bm25_service.build(chunk_dicts)
 
         # FAISS Index
+        logger.info("[EMBEDDING] Starting embedding generation")
         embed_service = EmbeddingService()
         embeddings = embed_service.generate_embeddings(chunks)
+        logger.info(f"[EMBEDDING] Embeddings generated: {len(embeddings)}")
 
         faiss_store = FAISSVectorStore(document_id)
         faiss_store.build(embeddings)
@@ -91,10 +106,10 @@ async def process_document_background(document_id: int, url: str, user_id: int):
         # Mark as ready
         document.status = "ready"
         db.commit()
-        logger.info(f"[INGESTION] Document {document_id} completed")
+        logger.info("[INGESTION] Document marked completed")
         
     except Exception as e:
-        logger.error(f"[INGESTION] Document {document_id} failed: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"[INGESTION] BACKGROUND TASK FAILED: {str(e)}\n{traceback.format_exc()}")
         db.rollback() # Rollback any pending uncommitted changes
         
         try:
@@ -137,6 +152,7 @@ async def ingest_document(
     db.commit()
     db.refresh(new_doc)
     
+    logger.info(f"[INGESTION] Scheduling background ingestion for document {new_doc.id}")
     background_tasks.add_task(process_document_background, new_doc.id, request.url, current_user.id)
     
     return new_doc
