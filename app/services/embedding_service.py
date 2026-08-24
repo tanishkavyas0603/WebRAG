@@ -4,9 +4,19 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+_embedding_model = None
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        logger.info("Lazy loading SentenceTransformer model...")
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
+    return _embedding_model
+
 class EmbeddingService:
     def __init__(self):
-        self.model = SentenceTransformer(settings.EMBEDDING_MODEL)
+        self.model = get_embedding_model()
 
     def generate_embeddings(self, chunks):
         logger.info("Generating embeddings...")

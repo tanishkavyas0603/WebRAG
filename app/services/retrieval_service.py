@@ -1,5 +1,5 @@
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from app.services.embedding_service import get_embedding_model
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -16,7 +16,7 @@ _MIN_COSINE_THRESHOLD = 0.15
 class RetrievalService:
     def __init__(self, document_id: int):
         self.document_id = document_id
-        self.model = SentenceTransformer(settings.EMBEDDING_MODEL)
+        self.model = get_embedding_model()
 
         self.store = FAISSVectorStore(document_id)
         self.index, self.metadata = self.store.load()
