@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 def process_document_background(document_id: int, url: str, user_id: int):
-    logger.info(f"[INGESTION] BACKGROUND TASK STARTED for document {document_id}")
+    logger.info(f"[INGESTION] BACKGROUND TASK STARTED DOCUMENT ID={document_id}")
     
     # Use a new DB session for background task
     try:
@@ -132,15 +132,24 @@ async def ingest_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # Quick check for existing processing/ready document with this URL
+    logger.info("[INGESTION] POST /documents/ingest RECEIVED")
+    
+    # Quick check for existing ready document with this URL
     existing_doc = db.query(Document).filter(
         Document.user_id == current_user.id,
-        Document.url == request.url,
-        Document.status.in_(["pending", "processing", "ready"])
+        Document.url == request.url
     ).first()
     
     if existing_doc:
-        return existing_doc
+        if existing_doc.status == "ready":
+            logger.info(f"[INGESTION] Returning existing ready document ID={existing_doc.id}")
+            return existing_doc
+        else:
+            # The document is stuck in pending/processing (zombie task from restart) or failed.
+            # We delete it so we can start fresh.
+            logger.info(f"[INGESTION] Deleting stuck/failed document ID={existing_doc.id} to start fresh")
+            db.delete(existing_doc)
+            db.commit()
         
     new_doc = Document(
         user_id=current_user.id,
@@ -152,8 +161,11 @@ async def ingest_document(
     db.commit()
     db.refresh(new_doc)
     
-    logger.info(f"[INGESTION] Scheduling background ingestion for document {new_doc.id}")
+    logger.info(f"[INGESTION] CREATED DOCUMENT ID={new_doc.id}")
+    
+    logger.info(f"[INGESTION] CALLING add_task FOR DOCUMENT ID={new_doc.id}")
     background_tasks.add_task(process_document_background, new_doc.id, request.url, current_user.id)
+    logger.info(f"[INGESTION] add_task COMPLETED FOR DOCUMENT ID={new_doc.id}")
     
     return new_doc
 
