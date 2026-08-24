@@ -88,9 +88,16 @@ class RAGService:
         ]
         messages = PromptService.build_messages(question, truncated_chunks, chat_history)
 
+        context_char_count = sum(len(c.content) for c in truncated_chunks)
+        logger.info(f"[DIAGNOSTICS] final chunk count: {len(truncated_chunks)}")
+        logger.info(f"[DIAGNOSTICS] context character count: {context_char_count}")
+        logger.info(f"[DIAGNOSTICS] context passed to LLM: True")
+
         t_llm_start = time.perf_counter()
         llm_answer = self._call_llm(messages)
         llm_ms = (time.perf_counter() - t_llm_start) * 1_000
+        
+        logger.info(f"[DIAGNOSTICS] LLM response content length: {len(llm_answer)}")
 
         total_ms = round((time.perf_counter() - t_total_start) * 1_000, 2)
 
@@ -130,9 +137,30 @@ class RAGService:
                 temperature=0,
                 max_tokens=128,
             )
-            rewritten = response.choices[0].message.content.strip()
-            logger.info(f"Query Rewritten: '{question}' -> '{rewritten}'")
-            return rewritten
+            raw_response = response.choices[0].message.content.strip()
+            
+            # Strip <think>...</think> blocks using regex
+            cleaned = re.sub(r'<think>.*?</think>', '', raw_response, flags=re.DOTALL).strip()
+            
+            # Strip common prefixes that models might hallucinate
+            prefixes_to_strip = [
+                r'(?i)^draft:', r'(?i)^answer:', r'(?i)^rewritten query:', 
+                r'(?i)^standalone question:', r'(?i)^here is.*?:', r'(?i)^rephrased:'
+            ]
+            for prefix in prefixes_to_strip:
+                cleaned = re.sub(prefix, '', cleaned).strip()
+                
+            # Remove any surrounding quotes
+            cleaned = cleaned.strip('"\'`')
+            
+            if not cleaned or len(cleaned) > 200:
+                cleaned = question
+                
+            logger.info(f"[QUERY_REWRITE] original='{question}'")
+            logger.info(f"[QUERY_REWRITE] raw_response='{raw_response}'")
+            logger.info(f"[QUERY_REWRITE] cleaned='{cleaned}'")
+            
+            return cleaned
         except APIStatusError as e:
             logger.error(f"Groq APIStatusError: {e}")
             raise LLMError("AI model is currently unavailable or misconfigured. Please try again later.")
