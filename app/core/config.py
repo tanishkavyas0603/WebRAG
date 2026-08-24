@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     CORS_ORIGINS: str = "http://localhost:5173"
     DATA_PATH: str = "data"
+    FAISS_INDEX_DIR: str = "./data/index"
 
     # ------------------------------------------------------------------ #
     # Models                                                               #
