@@ -54,7 +54,7 @@ def patch_sentence_transformer():
 @pytest.fixture(scope="session", autouse=True)
 def patch_groq():
     """Prevent real Groq API calls during ALL tests."""
-    with patch("groq.Groq") as mock_cls:
+    with patch("app.services.rag_service.Groq") as mock_cls:
         mock_client = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = "Mocked LLM answer from webpage context."

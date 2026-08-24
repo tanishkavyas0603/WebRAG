@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # Models                                                               #
     # ------------------------------------------------------------------ #
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-    GROQ_MODEL: str = "qwen/qwen3.6-27b"
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
 
     # ------------------------------------------------------------------ #
     # Retrieval — dense                                                    #
