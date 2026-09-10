@@ -212,6 +212,7 @@ export default function Chat() {
                   </div>
                   
                   {/* Citations */}
+                  {/* 
                   {!isUser && msg.citations && msg.citations.length > 0 && (
                     <div className="w-full mt-4 space-y-3">
                       <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider pl-1">Sources</p>
@@ -239,7 +240,8 @@ export default function Chat() {
                         })}
                       </div>
                     </div>
-                  )}
+                  )} 
+                  */}
                   
                   <span className="text-[10px] text-slate-400 mt-1 px-1">
                     {formatDistanceToNow(parseUtcDate(msg.created_at), { addSuffix: true })}

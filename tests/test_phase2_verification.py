@@ -349,23 +349,63 @@ class TestSSRFProtection:
             self._svc("not-a-url")._validate_url_safety("not-a-url")
 
     def test_redirect_to_localhost_blocked(self):
-        """Verify the redirect to localhost is blocked by the request hook."""
+        """Verify the redirect to localhost is blocked."""
         from app.services.ingestion_service import SSRFProtectionError
         import httpx
         import asyncio
-        req = httpx.Request("GET", "http://127.0.0.1/admin")
+        
+        class MockResponse:
+            def __init__(self, status_code, location=None):
+                self.status_code = status_code
+                self.headers = {"Location": location} if location else {}
+                self.url = "http://public.com"
+
+        class MockClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def get(self, url):
+                if "public.com" in url:
+                    return MockResponse(302, location="http://127.0.0.1/admin")
+                return MockResponse(200)
+
+        svc = self._svc("http://public.com")
+        
+        async def run_test():
+            with patch("httpx.AsyncClient", return_value=MockClient()):
+                await svc.fetch_html()
+
         with pytest.raises(SSRFProtectionError):
-            asyncio.run(self._svc("http://public.com")._validate_request_hook(req))
+            asyncio.run(run_test())
 
     def test_redirect_to_private_ip_blocked(self):
-        """Verify redirect to private IPv4 is blocked by the request hook."""
+        """Verify redirect to private IPv4 is blocked."""
         from app.services.ingestion_service import SSRFProtectionError
         import httpx
         import asyncio
+        
+        class MockResponse:
+            def __init__(self, status_code, location=None):
+                self.status_code = status_code
+                self.headers = {"Location": location} if location else {}
+                self.url = "http://public.com"
+
         for ip in ["http://192.168.1.100", "http://10.0.0.5"]:
-            req = httpx.Request("GET", ip)
+            class MockClient:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *args): pass
+                async def get(self, url):
+                    if "public.com" in url:
+                        return MockResponse(302, location=ip)
+                    return MockResponse(200)
+
+            svc = self._svc("http://public.com")
+            
+            async def run_test():
+                with patch("httpx.AsyncClient", return_value=MockClient()):
+                    await svc.fetch_html()
+
             with pytest.raises(SSRFProtectionError):
-                asyncio.run(self._svc("http://public.com")._validate_request_hook(req))
+                asyncio.run(run_test())
 
 
 

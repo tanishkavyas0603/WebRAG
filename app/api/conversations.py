@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from app.core.database import get_db
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_rate_limiter
 from app.models.db import User, Conversation, Document, Message
 from app.models.schemas import ConversationCreate, ConversationResponse, MessageCreate, MessageResponse, Source
 from app.services.conversation_service import ConversationService
@@ -105,7 +105,7 @@ def send_message(
     req: MessageCreate, 
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db), 
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_rate_limiter())
 ):
     conv = db.query(Conversation).filter(Conversation.id == conversation_id, Conversation.user_id == current_user.id).first()
     if not conv:
@@ -142,8 +142,18 @@ def send_message(
         return assistant_msg
         
     except Exception as e:
-        # Check if the exception class name is LLMError to avoid circular imports if needed, 
-        # or we can just import LLMError at the top. Let's import it locally or check class name.
+        import groq
+        # Catch Groq-specific API errors
+        if isinstance(e, groq.APIError):
+            logger.error(f"Groq API Error: {e}")
+            raise HTTPException(status_code=503, detail="The AI service is temporarily unavailable. Please try again later.")
+        if isinstance(e, groq.APIConnectionError):
+            logger.error(f"Groq Connection Error: {e}")
+            raise HTTPException(status_code=503, detail="The AI service could not be reached. Please try again later.")
+        if isinstance(e, groq.RateLimitError):
+            logger.warning(f"Groq Rate Limit Exceeded: {e}")
+            raise HTTPException(status_code=503, detail="The AI service is currently overloaded. Please wait a moment and try again.")
+            
         if type(e).__name__ == "LLMError":
             raise HTTPException(status_code=503, detail=str(e))
         logger.error(f"RAG failed: {e}")

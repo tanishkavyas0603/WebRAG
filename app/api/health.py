@@ -9,9 +9,7 @@ router = APIRouter()
 def health_check(db: Session = Depends(get_db)):
     status = {
         "status": "healthy",
-        "database": "disconnected",
-        "rag": "ready",
-        "llm": "available" # We assume Groq is available if key is set
+        "database": "disconnected"
     }
     
     try:

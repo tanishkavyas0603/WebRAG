@@ -29,6 +29,7 @@ class DocumentIngestionService:
         self.timeout = 15.0
 
     def _validate_url_safety(self, url: str):
+        # NEW IMPLEMENTATION: Robust SSRF checking
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
             raise SSRFProtectionError(f"Unsupported scheme: {parsed.scheme}")
@@ -37,21 +38,25 @@ class DocumentIngestionService:
         if not hostname:
             raise SSRFProtectionError("Invalid URL format")
 
-        if hostname.lower() in ("localhost", "127.0.0.1", "[::1]"):
+        # Basic string checks
+        if hostname.lower() in ("localhost", "127.0.0.1", "[::1]", "0.0.0.0"):
             raise SSRFProtectionError("Localhost is not allowed")
 
+        # Strict IP checks
         try:
-            ip_addr = socket.gethostbyname(hostname)
-            ip = ipaddress.ip_address(ip_addr)
-            if ip.is_private or ip.is_loopback or ip.is_link_local:
-                raise SSRFProtectionError("Private IP addresses are not allowed")
+            addr_info = socket.getaddrinfo(hostname, None)
+            for result in addr_info:
+                ip_str = result[4][0]
+                ip = ipaddress.ip_address(ip_str)
+                if (ip.is_private or ip.is_loopback or ip.is_link_local or 
+                    ip.is_multicast or ip.is_unspecified or ip.is_reserved):
+                    raise SSRFProtectionError("Blocked IP range detected")
+                # Block AWS metadata explicitly
+                if str(ip) == "169.254.169.254":
+                    raise SSRFProtectionError("Cloud metadata IP blocked")
         except socket.gaierror:
-            # Let the actual request handle DNS failures, but it's safe from SSRF if it doesn't resolve
+            # Let the actual request handle DNS failures
             pass
-
-    async def _validate_request_hook(self, request: httpx.Request):
-        """Hook called before EVERY request, including redirects"""
-        self._validate_url_safety(str(request.url))
 
     async def fetch_html(self) -> str:
         logger.info(f"Downloading from {self.url}...")
@@ -61,33 +66,56 @@ class DocumentIngestionService:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
         
+        current_url = self.url
+        redirects = 0
+        
         try:
+            # NEW IMPLEMENTATION: Manual redirect handling to validate every hop
             async with httpx.AsyncClient(
                 timeout=self.timeout,
-                max_redirects=5,
-                follow_redirects=True,
-                event_hooks={'request': [self._validate_request_hook]},
+                follow_redirects=False, # We handle redirects manually
                 headers=headers
             ) as client:
-                response = await client.get(self.url)
                 
-                # Check Content-Type early
-                content_type = response.headers.get('Content-Type', '').lower()
-                if "text/html" not in content_type and "application/xhtml+xml" not in content_type and "text/plain" not in content_type:
-                    raise IngestionError("The provided URL does not contain an HTML webpage.")
-
-                response.raise_for_status()
-                
-                content_length = response.headers.get('Content-Length')
-                if content_length and int(content_length) > self.max_size_bytes:
-                    raise IngestionError("Document exceeds maximum size limit (10MB).")
-                
-                text = response.text
-                if len(text.encode('utf-8')) > self.max_size_bytes:
-                    raise IngestionError("Document exceeds maximum size limit (10MB).")
+                while redirects <= 5:
+                    self._validate_url_safety(current_url)
                     
-                logger.info("Download completed.")
-                return text
+                    response = await client.get(current_url)
+                    
+                    # Handle redirects
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        redirect_url = response.headers.get("Location")
+                        if not redirect_url:
+                            raise IngestionError("Redirect location missing.")
+                        
+                        # Handle relative redirects
+                        if not redirect_url.startswith("http"):
+                            from urllib.parse import urljoin
+                            redirect_url = urljoin(str(response.url), redirect_url)
+                            
+                        current_url = redirect_url
+                        redirects += 1
+                        if redirects > 5:
+                            raise IngestionError("Too many redirects.")
+                        continue
+                        
+                    # Check Content-Type early
+                    content_type = response.headers.get('Content-Type', '').lower()
+                    if "text/html" not in content_type and "application/xhtml+xml" not in content_type and "text/plain" not in content_type:
+                        raise IngestionError("The provided URL does not contain an HTML webpage.")
+
+                    response.raise_for_status()
+                    
+                    content_length = response.headers.get('Content-Length')
+                    if content_length and int(content_length) > self.max_size_bytes:
+                        raise IngestionError("Document exceeds maximum size limit (10MB).")
+                    
+                    text = response.text
+                    if len(text.encode('utf-8')) > self.max_size_bytes:
+                        raise IngestionError("Document exceeds maximum size limit (10MB).")
+                        
+                    logger.info("Download completed.")
+                    return text
 
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
@@ -105,6 +133,56 @@ class DocumentIngestionService:
             raise # Propagate SSRF specific errors directly
         except httpx.RequestError as e:
             raise IngestionError(f"Failed to connect to the webpage.")
+
+    # OLD IMPLEMENTATION (Commented out):
+    # def _validate_url_safety(self, url: str):
+    #     parsed = urlparse(url)
+    #     if parsed.scheme not in ("http", "https"):
+    #         raise SSRFProtectionError(f"Unsupported scheme: {parsed.scheme}")
+    #     hostname = parsed.hostname
+    #     if not hostname:
+    #         raise SSRFProtectionError("Invalid URL format")
+    #     if hostname.lower() in ("localhost", "127.0.0.1", "[::1]"):
+    #         raise SSRFProtectionError("Localhost is not allowed")
+    #     try:
+    #         ip_addr = socket.gethostbyname(hostname)
+    #         ip = ipaddress.ip_address(ip_addr)
+    #         if ip.is_private or ip.is_loopback or ip.is_link_local:
+    #             raise SSRFProtectionError("Private IP addresses are not allowed")
+    #     except socket.gaierror:
+    #         pass
+    #
+    # async def _validate_request_hook(self, request: httpx.Request):
+    #     self._validate_url_safety(str(request.url))
+    #
+    # async def fetch_html(self) -> str:
+    #     logger.info(f"Downloading from {self.url}...")
+    #     headers = {
+    #         "User-Agent": settings.WEBRAG_USER_AGENT,
+    #         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    #     }
+    #     try:
+    #         async with httpx.AsyncClient(
+    #             timeout=self.timeout, max_redirects=5, follow_redirects=True,
+    #             event_hooks={'request': [self._validate_request_hook]}, headers=headers
+    #         ) as client:
+    #             response = await client.get(self.url)
+    #             content_type = response.headers.get('Content-Type', '').lower()
+    #             if "text/html" not in content_type and "application/xhtml+xml" not in content_type and "text/plain" not in content_type:
+    #                 raise IngestionError("The provided URL does not contain an HTML webpage.")
+    #             response.raise_for_status()
+    #             content_length = response.headers.get('Content-Length')
+    #             if content_length and int(content_length) > self.max_size_bytes:
+    #                 raise IngestionError("Document exceeds maximum size limit (10MB).")
+    #             text = response.text
+    #             if len(text.encode('utf-8')) > self.max_size_bytes:
+    #                 raise IngestionError("Document exceeds maximum size limit (10MB).")
+    #             logger.info("Download completed.")
+    #             return text
+    #     except httpx.HTTPStatusError as e: ...
+    #     except httpx.TimeoutException: ...
+    #     except SSRFProtectionError: ...
+    #     except httpx.RequestError as e: ...
 
 
     def extract_text(self, html: str) -> tuple[str, str]:

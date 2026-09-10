@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 import traceback
 
 from app.core.database import get_db, SessionLocal
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_rate_limiter
 from app.models.db import User, Document, Chunk
 from app.models.schemas import DocumentIngestRequest, DocumentResponse
 from app.services.ingestion_service import DocumentIngestionService
@@ -13,6 +13,7 @@ from app.services.embedding_service import EmbeddingService
 from app.vectorstore.faiss_store import FAISSVectorStore
 from app.services.bm25_service import BM25Service
 from app.core.logging import get_logger
+from urllib.parse import urlparse
 
 logger = get_logger(__name__)
 
@@ -130,9 +131,13 @@ async def ingest_document(
     request: DocumentIngestRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_rate_limiter())
 ):
     logger.info("[INGESTION] POST /documents/ingest RECEIVED")
+    
+    parsed = urlparse(request.url)
+    if not parsed.scheme or not parsed.hostname:
+        raise HTTPException(status_code=422, detail="Invalid URL format")
     
     # Quick check for existing ready document with this URL
     existing_doc = db.query(Document).filter(
