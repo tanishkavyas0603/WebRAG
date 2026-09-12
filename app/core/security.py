@@ -3,6 +3,10 @@ from datetime import datetime, timedelta, timezone
 from jose import jwt
 from app.core.config import settings
 
+# Used to equalize login timing when no user is found, so the response time
+# doesn't leak whether an email is registered (bcrypt.checkpw is deliberately slow).
+_DUMMY_HASH = bcrypt.hashpw(b"dummy-password", bcrypt.gensalt()).decode("utf-8")
+
 
 def get_password_hash(password: str) -> str:
     pwd_bytes = password.encode("utf-8")

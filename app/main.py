@@ -1,3 +1,6 @@
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -7,11 +10,37 @@ from app.api.conversations import router as conversations_router
 from app.api.health import router as health_router
 
 from app.core.config import settings
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+_ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Apply any pending schema migrations on startup. This is what makes a
+    # fresh deployment (e.g. a new Render Postgres database) work without a
+    # manual "alembic upgrade head" step; it is a no-op when already current.
+    # Failure here is logged, not fatal — the app still starts so /api/health
+    # remains reachable for diagnosis rather than crash-looping.
+    try:
+        from alembic import command
+        from alembic.config import Config
+
+        alembic_cfg = Config(str(_ALEMBIC_INI))
+        command.upgrade(alembic_cfg, "head")
+        logger.info("Database migrations are up to date.")
+    except Exception as e:
+        logger.error(f"Failed to apply database migrations at startup: {e}")
+    yield
+
 
 app = FastAPI(
     title="WebRAG",
     version="1.0.0",
-    description="Chat with any webpage. Ask questions. Get grounded answers."
+    description="Chat with any webpage. Ask questions. Get grounded answers.",
+    lifespan=lifespan,
 )
 
 # Parse comma-separated origins

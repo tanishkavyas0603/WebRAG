@@ -1,7 +1,7 @@
 import re
 import time
 from dataclasses import dataclass
-from groq import Groq, APIStatusError, APIConnectionError, GroqError
+from groq import Groq, APIStatusError, APIConnectionError, GroqError, RateLimitError
 
 class LLMError(Exception):
     pass
@@ -98,6 +98,7 @@ class RAGService:
         llm_ms = (time.perf_counter() - t_llm_start) * 1_000
         
         logger.info(f"[DIAGNOSTICS] LLM response content length: {len(llm_answer)}")
+        logger.info(f"[DIAGNOSTICS] llm_answer exact value: {repr(llm_answer)}")
 
         total_ms = round((time.perf_counter() - t_total_start) * 1_000, 2)
 
@@ -136,6 +137,7 @@ class RAGService:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 max_tokens=128,
+                reasoning_effort="none",
             )
             raw_response = response.choices[0].message.content.strip()
             
@@ -161,6 +163,9 @@ class RAGService:
             logger.info(f"[QUERY_REWRITE] cleaned='{cleaned}'")
             
             return cleaned
+        except RateLimitError as e:
+            logger.warning(f"Groq RateLimitError in _rewrite_query: {e}")
+            raise LLMError("The AI service is currently receiving too many requests. Please wait a moment and try again.")
         except APIStatusError as e:
             logger.error(f"Groq APIStatusError: {e}")
             raise LLMError("AI model is currently unavailable or misconfigured. Please try again later.")
@@ -187,12 +192,36 @@ class RAGService:
                 model=settings.GROQ_MODEL,
                 messages=messages,
                 temperature=0,
-                max_tokens=1_024,
+                # Kept comfortably under this account's 1000 output-tokens-per-minute
+                # cap on this model — a request whose max_tokens alone exceeds that
+                # ceiling is rejected outright with HTTP 429, regardless of usage.
+                max_tokens=768,
+                reasoning_effort="none",
             )
             content = response.choices[0].message.content
-            # Strip <think>...</think> blocks
-            content = re.sub(r'<think>.*?</think>\s*', '', content, flags=re.DOTALL).strip()
+            logger.info(f"[DIAGNOSTICS] raw Groq content exact value: {repr(content)}")
+
+            if content is None:
+                logger.error("[DIAGNOSTICS] Groq returned None content — treating as LLM error")
+                raise LLMError("The AI service returned an empty response. Please try again.")
+
+            # Strip <think>...</think> blocks (robust approach)
+            # Split on closing tag and take content after, handles unclosed/unopened tags
+            if '</think>' in content:
+                content = content.split('</think>')[-1]
+            content = content.strip()
+            logger.info(f"[DIAGNOSTICS] content after stripping think blocks: {repr(content)}")
+
+            # BUG-02 FIX: Guard against empty response after stripping.
+            # Without this, an empty string reaches the frontend as a blank message bubble.
+            if not content:
+                logger.warning("[DIAGNOSTICS] Groq content empty after stripping think blocks — returning fallback")
+                return "I was unable to generate a response. Please try rephrasing your question."
+
             return content
+        except RateLimitError as e:
+            logger.warning(f"Groq RateLimitError in _call_llm: {e}")
+            raise LLMError("The AI service is currently receiving too many requests. Please wait a moment and try again.")
         except APIStatusError as e:
             logger.error(f"Groq APIStatusError in _call_llm: {e}")
             raise LLMError("AI model is currently unavailable or misconfigured. Please try again later.")

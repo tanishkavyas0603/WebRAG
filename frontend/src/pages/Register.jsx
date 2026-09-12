@@ -26,6 +26,11 @@ export default function Register() {
       return;
     }
 
+    if (password.length > 72) {
+      setError('Password must be at most 72 characters.');
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -38,7 +43,12 @@ export default function Register() {
       if (err.response?.status === 400) {
         setError(err.response.data.detail || 'Email already registered.');
       } else if (err.response?.status === 422) {
-        setError('Please enter a valid email address.');
+        // FastAPI/Pydantic validation errors return detail as a list of
+        // {msg, loc, ...} objects, not a plain string — surface the first
+        // one instead of assuming every 422 here is an invalid email.
+        const detail = err.response.data?.detail;
+        const msg = Array.isArray(detail) ? detail[0]?.msg : detail;
+        setError(msg || 'Please check your email and password and try again.');
       } else {
         setError('An unexpected error occurred. Please try again later.');
       }

@@ -60,7 +60,13 @@ class EmbeddingService:
                             break
                             
                         elif response.status_code in (401, 403):
-                            logger.error(f"[EMBEDDING] ERROR: HuggingFace returned HTTP {response.status_code}")
+                            logger.error(
+                                f"[EMBEDDING] ERROR: HuggingFace returned HTTP {response.status_code}. "
+                                "HF_TOKEN is invalid, revoked, or lacks Inference API access. "
+                                "Note: environment variables are loaded once at process startup — "
+                                "if HF_TOKEN was just added/rotated (in .env or on Render), this "
+                                "process must be restarted/redeployed to pick up the new value."
+                            )
                             raise RuntimeError(f"Hugging Face authentication failed (HTTP {response.status_code}). Please check your HF_TOKEN.")
                             
                         elif response.status_code == 429:

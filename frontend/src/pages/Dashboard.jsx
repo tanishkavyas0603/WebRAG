@@ -1,25 +1,30 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Bot, Link as LinkIcon, Loader2, ArrowRight, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { documentsApi } from '../api/documents';
 import { conversationsApi } from '../api/conversations';
 import clsx from 'clsx';
 
-const STATUS_MESSAGES = {
-  pending: "Pending ingestion...",
-  fetching: "Fetching webpage...",
-  extracting: "Extracting content...",
-  chunking: "Creating chunks...",
-  indexing: "Building search index...",
-  ready: "Ready to chat",
-  failed: "Ingestion failed"
-};
+// BUG-01 FIX: statusOrder must match ACTUAL backend status values.
+// Backend only ever returns: 'pending', 'processing', 'ready', 'failed'
+// The previous statusOrder included 'fetching', 'extracting', 'chunking', 'indexing'
+// which NEVER appear in the DB. When status was 'processing', indexOf returned -1,
+// causing ALL steps to show as unfilled circles (broken progress UI).
+const STATUS_STEPS = [
+  { key: 'pending',    label: 'Received — queued for processing...' },
+  { key: 'processing', label: 'Processing webpage...' },
+  { key: 'ready',      label: 'Ready to chat' },
+];
+
+// BUG-07: Maximum polling attempts before declaring timeout (150 × 2s = 5 minutes)
+const MAX_POLL_ATTEMPTS = 150;
 
 export default function Dashboard() {
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [ingestStatus, setIngestStatus] = useState(null); // Document object
+  const [pollCount, setPollCount] = useState(0);
   const navigate = useNavigate();
 
   // Poll for document status
@@ -30,34 +35,55 @@ export default function Dashboard() {
     let intervalId;
 
     if (ingestStatus.status === 'ready') {
+      // Document is ready — create a conversation and navigate
       const transitionToChat = async () => {
         try {
           const conv = await conversationsApi.create(ingestStatus.id);
           if (isMounted) {
+            // BUG-05 FIX: Removed window.location.reload() — it was a full browser
+            // reload that destroyed React state and caused a jarring user experience.
+            // The sidebar re-fetches automatically on route change via its own useEffect.
             navigate(`/app/chat/${conv.id}`);
-            window.location.reload(); 
           }
         } catch (err) {
           if (isMounted) {
             console.error("Failed to start chat", err);
-            setError("Failed to start chat session.");
+            setError("Failed to start chat session. Please try again.");
             setLoading(false);
           }
         }
       };
       transitionToChat();
-    } else if (ingestStatus.status !== 'failed') {
+    } else if (ingestStatus.status === 'failed') {
+      // Stopped — do not set up polling
+      setLoading(false);
+    } else {
+      // BUG-07 FIX: Cap polling at MAX_POLL_ATTEMPTS to prevent infinite loops
+      // when a document gets stuck in 'pending' or 'processing' after a server restart.
+      if (pollCount >= MAX_POLL_ATTEMPTS) {
+        if (isMounted) {
+          setError(
+            "The webpage is taking longer than expected to process. " +
+            "This may happen after a server restart. Please try submitting the URL again."
+          );
+          setLoading(false);
+        }
+        return;
+      }
+
       intervalId = setInterval(async () => {
         try {
           const updatedDoc = await documentsApi.getStatus(ingestStatus.id);
           if (isMounted) {
             setIngestStatus(updatedDoc);
+            setPollCount(prev => prev + 1);
           }
         } catch (err) {
           if (isMounted) {
             console.error("Polling error", err);
             setError("Lost connection while checking status.");
             clearInterval(intervalId);
+            setLoading(false);
           }
         }
       }, 2000);
@@ -67,7 +93,7 @@ export default function Dashboard() {
       isMounted = false;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [ingestStatus, navigate]);
+  }, [ingestStatus, navigate, pollCount]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -84,6 +110,7 @@ export default function Dashboard() {
     setError('');
     setLoading(true);
     setIngestStatus(null);
+    setPollCount(0);
 
     try {
       const doc = await documentsApi.ingest(url);
@@ -91,6 +118,8 @@ export default function Dashboard() {
     } catch (err) {
       if (err.response?.status === 400 || err.response?.status === 422) {
         setError(err.response.data.detail || "Invalid or unsupported URL.");
+      } else if (err.response?.status === 429) {
+        setError("Too many requests. Please wait a moment and try again.");
       } else {
         setError("An error occurred while communicating with the server.");
       }
@@ -98,11 +127,33 @@ export default function Dashboard() {
     }
   };
 
+  const handleReset = () => {
+    setIngestStatus(null);
+    setLoading(false);
+    setError('');
+    setPollCount(0);
+  };
+
   const exampleQuestions = [
     "Summarize this page",
     "What are the key points?",
     "Explain this in simple terms"
   ];
+
+  // BUG-01 FIX: Correctly determine step state based on actual backend status values.
+  const getStepState = (stepKey, currentStatus) => {
+    const order = ['pending', 'processing', 'ready'];
+    const currentIdx = order.indexOf(currentStatus);
+    const stepIdx = order.indexOf(stepKey);
+
+    if (currentStatus === 'failed') {
+      return stepIdx === 0 ? 'complete' : 'failed';
+    }
+    if (currentIdx === -1) return 'pending'; // Unknown status — show as pending
+    if (stepIdx < currentIdx) return 'complete';
+    if (stepIdx === currentIdx) return 'current';
+    return 'pending';
+  };
 
   return (
     <div className="h-full flex flex-col items-center justify-center p-4 md:p-8">
@@ -162,7 +213,7 @@ export default function Dashboard() {
                   <button 
                     key={i} 
                     className="px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-600 hover:bg-slate-100 transition-colors"
-                    onClick={() => {}} // Disabled for dashboard, just visual
+                    onClick={() => {}} // Visual only on dashboard
                     disabled
                   >
                     {q}
@@ -174,7 +225,8 @@ export default function Dashboard() {
         )}
 
         {/* Ingestion Progress */}
-        {ingestStatus && (
+        {/* BUG-01 FIX: Status steps now correctly reflect backend states */}
+        {ingestStatus && ingestStatus.status !== 'failed' && (
           <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl p-6 shadow-sm text-left">
             <h3 className="font-semibold text-slate-900 mb-6 flex items-center gap-2">
               <Loader2 className="w-5 h-5 animate-spin text-primary-500" />
@@ -182,61 +234,74 @@ export default function Dashboard() {
             </h3>
             
             <div className="space-y-4">
-              {Object.keys(STATUS_MESSAGES).map((key) => {
-                const statusOrder = ['pending', 'fetching', 'extracting', 'chunking', 'indexing', 'ready'];
-                const currentIndex = statusOrder.indexOf(ingestStatus.status);
-                const stepIndex = statusOrder.indexOf(key);
-                
-                if (key === 'failed' && ingestStatus.status !== 'failed') return null;
-                if (ingestStatus.status === 'failed' && key !== 'failed' && stepIndex > statusOrder.indexOf('fetching')) return null;
-
-                const isComplete = currentIndex > stepIndex;
-                const isCurrent = currentIndex === stepIndex;
-                const isFailed = ingestStatus.status === 'failed' && key === 'failed';
-
-                if (stepIndex > currentIndex && !isFailed && ingestStatus.status !== 'failed') {
-                   // Show pending steps faintly
-                   return (
-                     <div key={key} className="flex items-center gap-3 text-slate-300">
-                       <div className="w-5 h-5 rounded-full border-2 border-slate-200 shrink-0" />
-                       <span className="text-sm">{STATUS_MESSAGES[key]}</span>
-                     </div>
-                   );
-                }
+              {STATUS_STEPS.map(({ key, label }) => {
+                const state = getStepState(key, ingestStatus.status);
 
                 return (
-                  <div 
-                    key={key} 
+                  <div
+                    key={key}
                     className={clsx(
                       "flex items-center gap-3",
-                      isFailed ? "text-red-600" : (isComplete || isCurrent ? "text-slate-700" : "text-slate-300")
+                      state === 'complete' || state === 'current' ? "text-slate-700" : "text-slate-300"
                     )}
                   >
-                    {isFailed ? (
-                      <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
-                    ) : isComplete ? (
+                    {state === 'complete' ? (
                       <CheckCircle2 className="w-5 h-5 text-primary-500 shrink-0" />
-                    ) : isCurrent ? (
+                    ) : state === 'current' ? (
                       <Loader2 className="w-5 h-5 animate-spin text-primary-500 shrink-0" />
                     ) : (
                       <div className="w-5 h-5 rounded-full border-2 border-slate-200 shrink-0" />
                     )}
-                    <span className={clsx("text-sm", isCurrent && "font-medium")}>
-                      {isFailed && ingestStatus.error_message ? ingestStatus.error_message : STATUS_MESSAGES[key]}
+                    <span className={clsx("text-sm", state === 'current' && "font-medium")}>
+                      {label}
                     </span>
                   </div>
                 );
               })}
             </div>
-            
-            {ingestStatus.status === 'failed' && (
-              <button 
-                onClick={() => { setIngestStatus(null); setLoading(false); setError(''); }}
-                className="mt-6 w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-medium transition-colors"
-              >
-                Try Again
-              </button>
+          </div>
+        )}
+
+        {/* Failed State */}
+        {ingestStatus && ingestStatus.status === 'failed' && (
+          <div className="w-full max-w-md bg-white border border-red-200 rounded-2xl p-6 shadow-sm text-left">
+            <h3 className="font-semibold text-red-700 mb-3 flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+              Unable to process this webpage
+            </h3>
+            {ingestStatus.error_message && (
+              <p className="text-sm text-slate-600 mb-4">{ingestStatus.error_message}</p>
             )}
+            <button
+              onClick={handleReset}
+              className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-medium transition-colors"
+            >
+              Try Again
+            </button>
+          </div>
+        )}
+
+        {/* Error message (non-document errors) */}
+        {error && !ingestStatus && (
+          <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 py-2 px-4 rounded-lg">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            {error}
+          </div>
+        )}
+
+        {/* Timeout error with reset */}
+        {error && ingestStatus && (
+          <div className="w-full max-w-md space-y-3">
+            <div className="flex items-start gap-2 text-red-600 text-sm bg-red-50 py-3 px-4 rounded-lg">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+            <button
+              onClick={handleReset}
+              className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-medium transition-colors"
+            >
+              Try Again
+            </button>
           </div>
         )}
       </div>

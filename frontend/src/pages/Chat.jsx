@@ -36,6 +36,7 @@ export default function Chat() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [sendError, setSendError] = useState('');
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
 
@@ -88,7 +89,7 @@ export default function Chat() {
     const messageText = input;
     setInput('');
     setSending(true);
-    setError('');
+    setSendError('');
 
     // Optimistically add user message
     const tempUserMsg = { id: Date.now(), role: 'user', content: messageText, created_at: new Date().toISOString() };
@@ -96,14 +97,32 @@ export default function Chat() {
 
     try {
       const assistantMessage = await conversationsApi.sendMessage(id, messageText);
-      // Re-fetch all messages to get exact state or append assistant msg
-      // For safety, re-fetch all
-      const msgs = await conversationsApi.getMessages(id);
-      setMessages(msgs);
+
+      // The send response already contains the full assistant message, so the
+      // UI is correct the moment this call succeeds. Apply it immediately —
+      // don't make a successful answer depend on a second network round trip.
+      setMessages(prev => [...prev, assistantMessage]);
+
+      // Best-effort re-sync with the server's canonical message list (picks up
+      // real IDs/timestamps). If this fails, the optimistic state above is
+      // still accurate, so we must NOT surface an error for it.
+      try {
+        const msgs = await conversationsApi.getMessages(id);
+        setMessages(msgs);
+      } catch (syncErr) {
+        console.error('Failed to refresh messages after send (non-fatal)', syncErr);
+      }
     } catch (err) {
-      setError('Sorry, I couldn\'t generate an answer right now. Please try again.');
-      // Revert optimistic update on fail
+      const serverError = err.response?.data?.detail;
+
+      setSendError(
+          serverError ||
+          'Sorry, I couldn\'t generate an answer right now. Please try again.'
+      );
+
+      // Revert optimistic update on fail, restoring the input so the user can retry
       setMessages(prev => prev.filter(m => m.id !== tempUserMsg.id));
+      setInput(messageText);
     } finally {
       setSending(false);
     }
@@ -269,6 +288,12 @@ export default function Chat() {
       {/* Input Area */}
       <div className="p-4 sm:p-6 bg-white border-t border-slate-100 shrink-0">
         <div className="max-w-4xl mx-auto relative">
+          {sendError && (
+            <div className="mb-2 flex items-start gap-2 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{sendError}</span>
+            </div>
+          )}
           <form onSubmit={handleSend} className="relative flex items-end gap-2">
             <textarea
               ref={textareaRef}
@@ -301,5 +326,3 @@ export default function Chat() {
   );
 }
 
-// Small helper since I imported ArrowRight but didn't put it in the import list
-import { ArrowRight } from 'lucide-react';

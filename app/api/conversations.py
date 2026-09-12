@@ -7,9 +7,10 @@ from app.api.deps import get_current_user, get_rate_limiter
 from app.models.db import User, Conversation, Document, Message
 from app.models.schemas import ConversationCreate, ConversationResponse, MessageCreate, MessageResponse, Source
 from app.services.conversation_service import ConversationService
-from app.services.rag_service import RAGService
+from app.services.rag_service import RAGService, LLMError
 from urllib.parse import urlparse
 from app.core.logging import get_logger
+import groq
 
 logger = get_logger(__name__)
 
@@ -139,22 +140,31 @@ def send_message(
             rag_response.answer, 
             citations=citations
         )
+        logger.info(f"[DIAGNOSTICS] API final json response msg.content: {repr(assistant_msg.content)}")
         return assistant_msg
         
     except Exception as e:
-        import groq
-        # Catch Groq-specific API errors
-        if isinstance(e, groq.APIError):
-            logger.error(f"Groq API Error: {e}")
-            raise HTTPException(status_code=503, detail="The AI service is temporarily unavailable. Please try again later.")
-        if isinstance(e, groq.APIConnectionError):
-            logger.error(f"Groq Connection Error: {e}")
-            raise HTTPException(status_code=503, detail="The AI service could not be reached. Please try again later.")
+        # BUG-03 FIX: Previously used type(e).__name__ string comparison for LLMError (fragile).
+        # Now uses isinstance() with LLMError imported at module level.
+
+        # LLMError is raised by our own RAG service for expected LLM failures.
+        if isinstance(e, LLMError):
+            logger.warning(f"LLMError in send_message: {e}")
+            raise HTTPException(status_code=503, detail=str(e))
+
+        # Groq-specific errors (ordered specific → general to avoid swallowing wrong errors)
         if isinstance(e, groq.RateLimitError):
             logger.warning(f"Groq Rate Limit Exceeded: {e}")
             raise HTTPException(status_code=503, detail="The AI service is currently overloaded. Please wait a moment and try again.")
-            
-        if type(e).__name__ == "LLMError":
-            raise HTTPException(status_code=503, detail=str(e))
-        logger.error(f"RAG failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate answer")
+
+        if isinstance(e, groq.APIConnectionError):
+            logger.error(f"Groq Connection Error: {e}")
+            raise HTTPException(status_code=503, detail="The AI service could not be reached. Please try again later.")
+
+        if isinstance(e, groq.APIStatusError):
+            logger.error(f"Groq API Status Error: {e}")
+            raise HTTPException(status_code=503, detail="The AI service is temporarily unavailable. Please try again later.")
+
+        # Unexpected errors — log full details internally, return generic message to user
+        logger.error(f"Unexpected RAG error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected error occurred. Please try again.")

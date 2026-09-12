@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.core.database import get_db
@@ -6,16 +6,17 @@ from app.core.database import get_db
 router = APIRouter()
 
 @router.get("")
-def health_check(db: Session = Depends(get_db)):
+def health_check(response: Response, db: Session = Depends(get_db)):
     status = {
         "status": "healthy",
         "database": "disconnected"
     }
-    
+
     try:
         db.execute(text("SELECT 1"))
         status["database"] = "connected"
     except Exception:
         status["status"] = "unhealthy"
-        
+        response.status_code = 503
+
     return status

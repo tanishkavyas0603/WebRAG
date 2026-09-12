@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 import traceback
@@ -7,7 +8,7 @@ from app.core.database import get_db, SessionLocal
 from app.api.deps import get_current_user, get_rate_limiter
 from app.models.db import User, Document, Chunk
 from app.models.schemas import DocumentIngestRequest, DocumentResponse
-from app.services.ingestion_service import DocumentIngestionService
+from app.services.ingestion_service import DocumentIngestionService, IngestionError, SSRFProtectionError
 from app.services.chunking_service import ChunkingService
 from app.services.embedding_service import EmbeddingService
 from app.vectorstore.faiss_store import FAISSVectorStore
@@ -18,6 +19,34 @@ from urllib.parse import urlparse
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+def _user_friendly_error(exc: Exception) -> str:
+    """
+    BUG-08 FIX: Map internal exception messages to user-safe strings.
+
+    Internal errors like "Hugging Face authentication failed (HTTP 401). Please check your HF_TOKEN."
+    or "Embedding API network request failed: ..." must not be shown directly to users.
+    Log the full exception internally; return a sanitised message for the DB/UI.
+    """
+    msg = str(exc)
+
+    # Errors from our own IngestionError class (already user-friendly from ingestion_service.py)
+    if isinstance(exc, SSRFProtectionError):
+        return "This URL is not allowed for security reasons."
+    if isinstance(exc, IngestionError):
+        return msg  # IngestionError messages are already user-facing
+
+    # Embedding / HF API errors
+    if "HF_TOKEN" in msg or "Hugging Face authentication" in msg or "huggingface" in msg.lower():
+        return "The embedding service is currently unavailable. Please try again later."
+    if "Embedding API" in msg or "embedding" in msg.lower():
+        return "Failed to generate document embeddings. Please try again later."
+
+    # Generic catch-all — do not expose internal details
+    logger.warning(f"[INGESTION] Unmapped internal error being sanitised: {msg}")
+    return "An unexpected error occurred during document processing. Please try again."
+
 
 def process_document_background(document_id: int, url: str, user_id: int):
     logger.info(f"[INGESTION] BACKGROUND TASK STARTED DOCUMENT ID={document_id}")
@@ -52,7 +81,9 @@ def process_document_background(document_id: int, url: str, user_id: int):
         except Exception as e:
             logger.error(f"[INGESTION] BACKGROUND TASK FAILED (fetching/extracting): {e}\n{traceback.format_exc()}")
             document.status = "failed"
-            document.error_message = str(e)
+            # BUG-08 FIX: Map internal errors to user-friendly messages.
+            # Raw exception messages (e.g. "HF_TOKEN missing") must not reach users.
+            document.error_message = _user_friendly_error(e)
             db.commit()
             return
             
@@ -60,6 +91,7 @@ def process_document_background(document_id: int, url: str, user_id: int):
 
         document.content = clean_text
         document.title = title[:255]
+        document.content_hash = hashlib.sha256(clean_text.encode('utf-8')).hexdigest()
         
         # Chunking
         chunking_service = ChunkingService(db, document)
@@ -118,7 +150,8 @@ def process_document_background(document_id: int, url: str, user_id: int):
             document = db.query(Document).filter(Document.id == document_id).first()
             if document:
                 document.status = "failed"
-                document.error_message = str(e)
+                # BUG-08 FIX: sanitise error message before storing — never expose internals to users
+                document.error_message = _user_friendly_error(e)
                 db.commit()
         except Exception as inner_e:
             logger.error(f"[INGESTION] Critical failure updating document status: {str(inner_e)}")

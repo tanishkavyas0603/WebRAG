@@ -31,10 +31,17 @@ class BM25Service:
         if not self.metadata_path.exists():
             logger.warning(f"Metadata not found for BM25 document {self.document_id}")
             return False
-            
-        with open(self.metadata_path, "rb") as f:
-            self.chunks = pickle.load(f)
-            
+
+        try:
+            with open(self.metadata_path, "rb") as f:
+                self.chunks = pickle.load(f)
+        except Exception as e:
+            # Corrupted/truncated metadata file — treat as missing rather than
+            # crashing retrieval; the FAISS-side recovery path (which shares
+            # this same metadata file) will regenerate it.
+            logger.error(f"Failed to load BM25 metadata for document {self.document_id}: {e}")
+            return False
+
         self.corpus = [_tokenize(chunk["content"]) for chunk in self.chunks]
         self.bm25 = BM25Okapi(self.corpus)
         logger.info(f"BM25 loaded for document {self.document_id} | chunks={len(self.chunks)}")

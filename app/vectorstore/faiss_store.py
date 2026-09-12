@@ -42,9 +42,19 @@ class FAISSVectorStore:
     def load(self):
         if not self.index_path.exists() or not self.metadata_path.exists():
             return None, None
-            
-        index = faiss.read_index(str(self.index_path))
-        with open(self.metadata_path, "rb") as file:
-            metadata = pickle.load(file)
-            
+
+        try:
+            index = faiss.read_index(str(self.index_path))
+            with open(self.metadata_path, "rb") as file:
+                metadata = pickle.load(file)
+        except Exception as e:
+            # A truncated/corrupted file (e.g. an interrupted write during a
+            # Render restart) must be treated the same as "missing" so the
+            # caller's recovery path rebuilds it, instead of crashing retrieval.
+            logger.error(
+                f"[FAISS_RECOVERY] Failed to load index/metadata for document "
+                f"{self.document_id}, treating as missing: {e}"
+            )
+            return None, None
+
         return index, metadata

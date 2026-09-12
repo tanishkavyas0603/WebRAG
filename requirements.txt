@@ -1,35 +1,36 @@
-fastapi
-uvicorn[standard]
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
 
-beautifulsoup4
-requests
-lxml
-httpx
-trafilatura
+beautifulsoup4==4.15.0
+requests==2.34.2
+lxml==6.1.2
+httpx==0.28.1
+trafilatura==2.2.0
 
-faiss-cpu
+faiss-cpu==1.15.0
 
-groq
+groq==1.6.0
 
-pydantic
-pydantic-settings
-email-validator
-python-dotenv
+pydantic==2.13.4
+pydantic-settings==2.15.0
+email-validator==2.3.0
+python-dotenv==1.2.3
 
-numpy
+numpy==2.5.2
 
-pytest
+pytest==9.1.1
 
-rank-bm25
+rank-bm25==0.2.2
 
 # Database
-SQLAlchemy
-alembic
-psycopg2-binary
+SQLAlchemy==2.0.52
+alembic==1.19.1
+psycopg2-binary==2.9.12
 
 # Auth & Security
-passlib[bcrypt]
-python-jose[cryptography]
-python-multipart
+passlib[bcrypt]==1.7.4
+bcrypt==5.0.0   # BUG-04 FIX: security.py imports bcrypt directly — must be explicit, not just a passlib transitive dep
+python-jose[cryptography]==3.5.0
+python-multipart==0.0.32
 
-lxml_html_clean>=0.4.2
+lxml_html_clean==0.4.5

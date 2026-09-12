@@ -1,3 +1,5 @@
+import re
+
 from sqlalchemy.orm import Session
 from app.models.db import Conversation, Message
 from app.core.config import settings
@@ -5,6 +7,26 @@ from groq import Groq
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+_THINK_BLOCK_RE = re.compile(r'<think>.*?</think>', re.DOTALL)
+
+
+def _sanitize_history_content(content: str) -> str:
+    """
+    Some assistant messages saved before the reasoning-model fix contain raw,
+    unstripped <think>...</think> reasoning (or an unclosed <think> block with
+    no real answer). Feeding that back into the LLM as conversation history on
+    every follow-up wastes tokens and can confuse/derail the model. Strip it
+    here, at the read boundary, without touching the stored data.
+    """
+    if not content:
+        return content
+    cleaned = _THINK_BLOCK_RE.sub('', content)
+    if '<think>' in cleaned:
+        cleaned = cleaned.split('<think>')[0]
+    cleaned = cleaned.strip()
+    return cleaned or "(no answer was generated for this turn)"
+
 
 class ConversationService:
     def __init__(self, db: Session):
@@ -17,12 +39,12 @@ class ConversationService:
     def get_recent_messages(self, conversation_id: int, limit: int = 10) -> list[dict[str, str]]:
         messages = self.db.query(Message).filter(Message.conversation_id == conversation_id)\
             .order_by(Message.created_at.desc()).limit(limit).all()
-            
+
         history = []
         for msg in reversed(messages):
             history.append({
                 "role": msg.role,
-                "content": msg.content
+                "content": _sanitize_history_content(msg.content),
             })
         return history
 

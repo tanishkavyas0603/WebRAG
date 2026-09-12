@@ -5,6 +5,7 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 // Create a singleton axios instance
 const apiClient = axios.create({
   baseURL: API_URL,
+  timeout: 90000, // generous ceiling so a stalled LLM/network call fails visibly instead of hanging forever
   headers: {
     'Content-Type': 'application/json',
   },

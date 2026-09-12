@@ -1,11 +1,13 @@
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, Field
 from typing import List, Optional
 from datetime import datetime
 
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
+    # bcrypt has a hard 72-byte limit and raises ValueError above it;
+    # cap here so registration fails with a clean 422 instead of a 500.
+    password: str = Field(min_length=8, max_length=72)
 
 
 class UserResponse(BaseModel):
@@ -49,7 +51,7 @@ class ConversationResponse(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=4000)
 
 
 class Source(BaseModel):
