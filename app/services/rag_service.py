@@ -3,8 +3,26 @@ import time
 from dataclasses import dataclass
 from groq import Groq, APIStatusError, APIConnectionError, GroqError, RateLimitError
 
+# ------------------------------------------------------------------ #
+# Application-specific exceptions                                      #
+# These are raised by service layers and translated to safe HTTP       #
+# responses at the API layer. They carry user-safe messages only.      #
+# ------------------------------------------------------------------ #
+
 class LLMError(Exception):
+    """Raised when Groq/LLM generation fails. Message is safe to show users."""
     pass
+
+
+class EmbeddingServiceError(Exception):
+    """Raised when HF embedding API fails. Message is safe to show users."""
+    pass
+
+
+class RetrievalError(Exception):
+    """Raised when retrieval pipeline fails critically. Message is safe to show users."""
+    pass
+
 
 from app.core.config import settings
 from app.core.logging import RAGRequestLogger, get_logger
@@ -67,6 +85,8 @@ class RAGService:
         if chat_history is None:
             chat_history = []
 
+        logger.info(f"[REQUEST_START] question={repr(question[:80])} model={settings.GROQ_MODEL}")
+
         standalone_question = self._rewrite_query(question, chat_history)
 
         t_retrieval_start = time.perf_counter()
@@ -74,6 +94,7 @@ class RAGService:
         retrieval_ms = (time.perf_counter() - t_retrieval_start) * 1_000
 
         if not pipeline.chunks:
+            logger.info("[REQUEST_SUCCESS] No relevant chunks found \u2014 returning empty response")
             return _empty_response(standalone_question)
 
         confidence = ConfidenceService.compute(cosine_scores=pipeline.cosine_scores)
@@ -93,10 +114,12 @@ class RAGService:
         logger.info(f"[DIAGNOSTICS] context character count: {context_char_count}")
         logger.info(f"[DIAGNOSTICS] context passed to LLM: True")
 
+        logger.info(f"[LLM_START] model={settings.GROQ_MODEL} chunks={len(truncated_chunks)} context_chars={context_char_count}")
         t_llm_start = time.perf_counter()
         llm_answer = self._call_llm(messages)
         llm_ms = (time.perf_counter() - t_llm_start) * 1_000
-        
+        logger.info(f"[LLM_SUCCESS] elapsed_ms={llm_ms:.1f} response_chars={len(llm_answer)}")
+
         logger.info(f"[DIAGNOSTICS] LLM response content length: {len(llm_answer)}")
         logger.info(f"[DIAGNOSTICS] llm_answer exact value: {repr(llm_answer)}")
 
@@ -104,6 +127,8 @@ class RAGService:
 
         req_log.log_latency(expansion_ms=0.0, retrieval_ms=retrieval_ms, llm_ms=llm_ms)
         req_log.emit()
+
+        logger.info(f"[REQUEST_SUCCESS] total_ms={total_ms}")
 
         sources = _build_sources(pipeline.chunks)
 
@@ -140,37 +165,51 @@ class RAGService:
                 reasoning_effort="none",
             )
             raw_response = response.choices[0].message.content.strip()
-            
+
             # Strip <think>...</think> blocks using regex
             cleaned = re.sub(r'<think>.*?</think>', '', raw_response, flags=re.DOTALL).strip()
-            
+
             # Strip common prefixes that models might hallucinate
             prefixes_to_strip = [
-                r'(?i)^draft:', r'(?i)^answer:', r'(?i)^rewritten query:', 
+                r'(?i)^draft:', r'(?i)^answer:', r'(?i)^rewritten query:',
                 r'(?i)^standalone question:', r'(?i)^here is.*?:', r'(?i)^rephrased:'
             ]
             for prefix in prefixes_to_strip:
                 cleaned = re.sub(prefix, '', cleaned).strip()
-                
+
             # Remove any surrounding quotes
-            cleaned = cleaned.strip('"\'`')
-            
+            cleaned = cleaned.strip("\"'`")
+
             if not cleaned or len(cleaned) > 200:
                 cleaned = question
-                
+
             logger.info(f"[QUERY_REWRITE] original='{question}'")
             logger.info(f"[QUERY_REWRITE] raw_response='{raw_response}'")
             logger.info(f"[QUERY_REWRITE] cleaned='{cleaned}'")
-            
+
             return cleaned
         except RateLimitError as e:
-            logger.warning(f"Groq RateLimitError in _rewrite_query: {e}")
+            logger.warning(f"[LLM_FAILURE] stage=query_rewrite reason=rate_limit model={settings.GROQ_MODEL}")
             raise LLMError("The AI service is currently receiving too many requests. Please wait a moment and try again.")
         except APIStatusError as e:
-            logger.error(f"Groq APIStatusError: {e}")
+            # Distinguish configuration errors from transient errors.
+            # 400/404 = bad model ID / deprecated model \u2014 do NOT tell user to retry.
+            # 500/502/503 = Groq outage \u2014 retry message is appropriate.
+            status_code = e.status_code if hasattr(e, "status_code") else 0
+            if status_code in (400, 404):
+                logger.error(
+                    f"[LLM_FAILURE] stage=query_rewrite reason=api_error status={status_code} "
+                    f"model={settings.GROQ_MODEL} "
+                    f"hint=Check_GROQ_MODEL_env_var_may_be_deprecated"
+                )
+            else:
+                logger.error(
+                    f"[LLM_FAILURE] stage=query_rewrite reason=api_error status={status_code} "
+                    f"model={settings.GROQ_MODEL}"
+                )
             raise LLMError("AI model is currently unavailable or misconfigured. Please try again later.")
         except GroqError as e:
-            logger.error(f"Groq GroqError: {e}")
+            logger.error(f"[LLM_FAILURE] stage=query_rewrite reason=groq_error type={type(e).__name__} model={settings.GROQ_MODEL}")
             raise LLMError("AI model connection failed. Please try again later.")
 
     def _retrieve(self, question: str, req_log: RAGRequestLogger) -> _PipelineResult:
@@ -193,7 +232,7 @@ class RAGService:
                 messages=messages,
                 temperature=0,
                 # Kept comfortably under this account's 1000 output-tokens-per-minute
-                # cap on this model — a request whose max_tokens alone exceeds that
+                # cap on this model \u2014 a request whose max_tokens alone exceeds that
                 # ceiling is rejected outright with HTTP 429, regardless of usage.
                 max_tokens=768,
                 reasoning_effort="none",
@@ -202,7 +241,7 @@ class RAGService:
             logger.info(f"[DIAGNOSTICS] raw Groq content exact value: {repr(content)}")
 
             if content is None:
-                logger.error("[DIAGNOSTICS] Groq returned None content — treating as LLM error")
+                logger.error("[LLM_FAILURE] stage=call_llm reason=none_content model={settings.GROQ_MODEL}")
                 raise LLMError("The AI service returned an empty response. Please try again.")
 
             # Strip <think>...</think> blocks (robust approach)
@@ -215,16 +254,29 @@ class RAGService:
             # BUG-02 FIX: Guard against empty response after stripping.
             # Without this, an empty string reaches the frontend as a blank message bubble.
             if not content:
-                logger.warning("[DIAGNOSTICS] Groq content empty after stripping think blocks — returning fallback")
+                logger.warning("[LLM_FAILURE] stage=call_llm reason=empty_after_strip model={settings.GROQ_MODEL}")
                 return "I was unable to generate a response. Please try rephrasing your question."
 
             return content
+        except LLMError:
+            raise  # re-raise without wrapping
         except RateLimitError as e:
-            logger.warning(f"Groq RateLimitError in _call_llm: {e}")
+            logger.warning(f"[LLM_FAILURE] stage=call_llm reason=rate_limit model={settings.GROQ_MODEL}")
             raise LLMError("The AI service is currently receiving too many requests. Please wait a moment and try again.")
         except APIStatusError as e:
-            logger.error(f"Groq APIStatusError in _call_llm: {e}")
+            status_code = e.status_code if hasattr(e, "status_code") else 0
+            if status_code in (400, 404):
+                logger.error(
+                    f"[LLM_FAILURE] stage=call_llm reason=api_error status={status_code} "
+                    f"model={settings.GROQ_MODEL} "
+                    f"hint=Check_GROQ_MODEL_env_var_may_be_deprecated"
+                )
+            else:
+                logger.error(
+                    f"[LLM_FAILURE] stage=call_llm reason=api_error status={status_code} "
+                    f"model={settings.GROQ_MODEL}"
+                )
             raise LLMError("AI model is currently unavailable or misconfigured. Please try again later.")
         except GroqError as e:
-            logger.error(f"Groq GroqError in _call_llm: {e}")
+            logger.error(f"[LLM_FAILURE] stage=call_llm reason=groq_error type={type(e).__name__} model={settings.GROQ_MODEL}")
             raise LLMError("AI model connection failed. Please try again later.")

@@ -1,8 +1,16 @@
+import logging
 import warnings
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Default value used at dev time. Production MUST override this via environment variable.
 _WEAK_SECRET_KEY = "change_this_in_production_secret_key"
+
+# ------------------------------------------------------------------ #
+# Known good Groq models that support reasoning_effort="none".         #
+# qwen/qwen3.6-27b was DEPRECATED by Groq and returns 404/400 errors. #
+# qwen/qwen3.8-27b is the current supported successor.                 #
+# ------------------------------------------------------------------ #
+_RECOMMENDED_GROQ_MODEL = "qwen/qwen3.8-27b"
 
 
 class Settings(BaseSettings):
@@ -16,10 +24,17 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     CORS_ORIGINS: str = "http://localhost:5173"
     DATA_PATH: str = "data"
-    FAISS_INDEX_DIR: str = "./data/index"
+    # Render uses an ephemeral filesystem — /tmp survives a request but not
+    # a dyno restart.  FAISS indexes are rebuilt from PostgreSQL chunks on
+    # first access after a restart via the recovery path in RetrievalService.
+    # Set FAISS_INDEX_DIR=/tmp/webrag/data/index on Render.
+    FAISS_INDEX_DIR: str = "/tmp/webrag/data/index"
 
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-    GROQ_MODEL: str = "qwen/qwen3.6-27b"
+    # IMPORTANT: qwen/qwen3.6-27b was deprecated on Groq. If you see
+    # "AI model is currently unavailable or misconfigured", check that
+    # GROQ_MODEL on Render is set to a live model (e.g. qwen/qwen3.8-27b).
+    GROQ_MODEL: str = "qwen/qwen3.8-27b"
 
     TOP_K: int = 5
     RETRIEVAL_MULTIPLIER: int = 3
@@ -76,3 +91,27 @@ def _check_hf_token(hf_token: str | None) -> None:
 
 
 _check_hf_token(settings.HF_TOKEN)
+
+
+# ------------------------------------------------------------------ #
+# Startup configuration summary — logged (not printed) so it appears  #
+# in Render logs. NEVER log the values of secrets.                     #
+# ------------------------------------------------------------------ #
+def log_startup_config() -> None:
+    """Emit a structured summary of critical config at process startup.
+    Logs presence/absence of required variables — NEVER their values."""
+    _log = logging.getLogger("app.startup")
+    _log.info("[STARTUP] WebRAG configuration summary:")
+    _log.info("[STARTUP]   GROQ_API_KEY   : %s", "set" if settings.GROQ_API_KEY else "MISSING")
+    _log.info("[STARTUP]   HF_TOKEN       : %s", "set" if settings.HF_TOKEN else "MISSING (embeddings will fail)")
+    _log.info("[STARTUP]   GROQ_MODEL     : %s", settings.GROQ_MODEL)
+    _log.info("[STARTUP]   EMBEDDING_MODEL: %s", settings.EMBEDDING_MODEL)
+    _log.info("[STARTUP]   FAISS_INDEX_DIR: %s", settings.FAISS_INDEX_DIR)
+    _log.info("[STARTUP]   DATABASE_URL   : %s", "set (sqlite)" if "sqlite" in settings.DATABASE_URL else "set (postgresql)")
+    _log.info("[STARTUP]   SECRET_KEY     : %s", "weak default — CHANGE IN PRODUCTION" if settings.SECRET_KEY == _WEAK_SECRET_KEY else "set")
+    if settings.GROQ_MODEL == "qwen/qwen3.6-27b":
+        _log.warning(
+            "[STARTUP] WARNING: GROQ_MODEL=qwen/qwen3.6-27b is DEPRECATED on Groq. "
+            "This will cause APIStatusError on every request. "
+            "Set GROQ_MODEL=qwen/qwen3.8-27b in your Render environment variables."
+        )

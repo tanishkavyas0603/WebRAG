@@ -48,7 +48,7 @@ class EmbeddingService:
                 
                 max_retries = 3
                 for attempt in range(1, max_retries + 1):
-                    logger.info("[EMBEDDING] HuggingFace request started")
+                    logger.info(f"[EMBEDDING_START] batch={batch_index}/{total_batches} attempt={attempt}/{max_retries} model={self.model}")
                     try:
                         response = client.post(self.api_url, headers=self.headers, json=payload)
                         logger.info(f"[EMBEDDING] HuggingFace response received: HTTP {response.status_code}")
@@ -56,13 +56,13 @@ class EmbeddingService:
                         if response.status_code == 200:
                             batch_embeddings = response.json()
                             embeddings.extend(batch_embeddings)
-                            logger.info(f"[EMBEDDING] Batch {batch_index}/{total_batches} completed")
+                            logger.info(f"[EMBEDDING_SUCCESS] batch={batch_index}/{total_batches} vectors={len(batch_embeddings)}")
                             break
                             
                         elif response.status_code in (401, 403):
                             logger.error(
-                                f"[EMBEDDING] ERROR: HuggingFace returned HTTP {response.status_code}. "
-                                "HF_TOKEN is invalid, revoked, or lacks Inference API access. "
+                                f"[EMBEDDING_FAILURE] status={response.status_code} "
+                                "hint=Check_HF_TOKEN_env_var_may_be_invalid_or_missing. "
                                 "Note: environment variables are loaded once at process startup — "
                                 "if HF_TOKEN was just added/rotated (in .env or on Render), this "
                                 "process must be restarted/redeployed to pick up the new value."
@@ -70,15 +70,15 @@ class EmbeddingService:
                             raise RuntimeError(f"Hugging Face authentication failed (HTTP {response.status_code}). Please check your HF_TOKEN.")
                             
                         elif response.status_code == 429:
-                            logger.error(f"[EMBEDDING] ERROR: HuggingFace returned HTTP 429")
+                            logger.error(f"[EMBEDDING_FAILURE] status=429 reason=rate_limit model={self.model}")
                             raise RuntimeError("Hugging Face API rate limit exceeded (HTTP 429).")
                             
                         elif response.status_code == 503:
                             if attempt == max_retries:
-                                logger.error("[EMBEDDING] ERROR: HuggingFace returned HTTP 503 consistently.")
+                                logger.error(f"[EMBEDDING_FAILURE] status=503 reason=model_loading_timeout attempts={max_retries} model={self.model}")
                                 raise RuntimeError("Hugging Face API is unavailable (Model loading failed after retries).")
                             backoff = 2 ** attempt
-                            logger.info(f"HF API 503 (Model loading). Waiting {backoff}s... Attempt {attempt}/{max_retries}")
+                            logger.info(f"[EMBEDDING] HF 503 model loading — waiting {backoff}s (attempt {attempt}/{max_retries})")
                             time.sleep(backoff)
                             continue
                             
@@ -86,23 +86,23 @@ class EmbeddingService:
                             response.raise_for_status()
                             
                     except httpx.TimeoutException:
-                        logger.error("[EMBEDDING] ERROR: HuggingFace request timed out")
+                        logger.error(f"[EMBEDDING_FAILURE] reason=timeout attempt={attempt}/{max_retries} model={self.model}")
                         if attempt == max_retries:
                             raise RuntimeError("Hugging Face API request timed out.")
                         backoff = 2 ** attempt
-                        logger.info(f"Request timed out. Waiting {backoff}s... Attempt {attempt}/{max_retries}")
+                        logger.info(f"[EMBEDDING] Timeout — waiting {backoff}s (attempt {attempt}/{max_retries})")
                         time.sleep(backoff)
                         
                     except httpx.RequestError as e:
-                        logger.error(f"[EMBEDDING] ERROR: Network error - {str(e)}")
+                        logger.error(f"[EMBEDDING_FAILURE] reason=network_error type={type(e).__name__} attempt={attempt}/{max_retries}")
                         if attempt == max_retries:
                             raise RuntimeError(f"Embedding API network request failed: {str(e)}")
                         backoff = 2 ** attempt
-                        logger.info(f"Network error. Waiting {backoff}s... Attempt {attempt}/{max_retries}")
+                        logger.info(f"[EMBEDDING] Network error — waiting {backoff}s (attempt {attempt}/{max_retries})")
                         time.sleep(backoff)
                         
                     except httpx.HTTPStatusError as e:
-                        logger.error(f"[EMBEDDING] ERROR: HuggingFace returned HTTP {e.response.status_code}")
+                        logger.error(f"[EMBEDDING_FAILURE] reason=http_error status={e.response.status_code} model={self.model}")
                         raise RuntimeError(f"Embedding API failed with HTTP {e.response.status_code}: {e.response.text}")
 
         arr = np.array(embeddings, dtype=np.float32)

@@ -230,9 +230,17 @@ class TestServerHealth:
         assert "status" in r.json()
 
     def test_health_database_connected(self, client):
-        """DB is connected in health check."""
-        r = client.get("/api/health")
-        assert r.json()["database"] == "connected"
+        """DB is connected — verified via the readiness endpoint (/api/health/ready).
+        The liveness endpoint (/api/health) intentionally omits this check to stay
+        fast and never block on external services."""
+        r = client.get("/api/health/ready")
+        assert r.status_code in (200, 503)
+        body = r.json()
+        assert "checks" in body
+        assert body["checks"].get("database") == "ok", (
+            f"Database check failed in readiness endpoint. Got: {body}"
+        )
+
 
     def test_openapi_has_all_routes(self, client):
         """All required API routes are registered."""
