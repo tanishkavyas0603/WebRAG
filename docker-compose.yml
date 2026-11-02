@@ -1,15 +1,55 @@
 version: '3.8'
+
 services:
   db:
-    image: postgres:15
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: postgres_secure_password
       POSTGRES_DB: webrag
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d webrag"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres_secure_password@db:5432/webrag
+      - SECRET_KEY=${SECRET_KEY:-change_this_in_production_secret_key}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - HF_TOKEN=${HF_TOKEN}
+      - GROQ_MODEL=${GROQ_MODEL:-qwen/qwen3.8-27b}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      - FAISS_INDEX_DIR=/app/data/index
+      - CORS_ORIGINS=http://localhost,http://localhost:80,http://localhost:5173
+    volumes:
+      - index_data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
 
 volumes:
-  postgres_data:
+  pgdata:
+  index_data:

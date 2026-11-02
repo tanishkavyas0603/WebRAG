@@ -1,3 +1,4 @@
+import json
 import pickle
 import re
 from pathlib import Path
@@ -16,7 +17,9 @@ def _tokenize(text: str) -> list[str]:
 class BM25Service:
     def __init__(self, document_id: int):
         self.document_id = document_id
-        self.metadata_path = Path(INDEX_DIR) / f"doc_{document_id}_metadata.pkl"
+        index_dir = Path(INDEX_DIR)
+        self.metadata_path = index_dir / f"doc_{document_id}_metadata.pkl"
+        self.json_metadata_path = index_dir / f"doc_{document_id}_metadata.json"
         self.chunks = []
         self.corpus = []
         self.bm25 = None
@@ -28,13 +31,18 @@ class BM25Service:
         logger.info(f"BM25 built for document {self.document_id} | chunks={len(self.chunks)}")
         
     def load(self):
-        if not self.metadata_path.exists():
+        if not self.json_metadata_path.exists() and not self.metadata_path.exists():
             logger.warning(f"Metadata not found for BM25 document {self.document_id}")
             return False
 
         try:
-            with open(self.metadata_path, "rb") as f:
-                self.chunks = pickle.load(f)
+            # Safe JSON deserialization prioritized
+            if self.json_metadata_path.exists():
+                with open(self.json_metadata_path, "r", encoding="utf-8") as f:
+                    self.chunks = json.load(f)
+            else:
+                with open(self.metadata_path, "rb") as f:
+                    self.chunks = pickle.load(f)
         except Exception as e:
             # Corrupted/truncated metadata file — treat as missing rather than
             # crashing retrieval; the FAISS-side recovery path (which shares

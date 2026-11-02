@@ -1,3 +1,5 @@
+import json
+from fastapi.responses import StreamingResponse
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List
@@ -174,3 +176,46 @@ def send_message(
         # Unexpected errors — log full details internally, return generic message to user
         logger.exception(f"Unexpected RAG error: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred. Please try again.")
+
+
+@router.post("/{conversation_id}/messages/stream")
+def send_message_stream(
+    conversation_id: int, 
+    req: MessageCreate, 
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_rate_limiter())
+):
+    """Stream RAG response token-by-token using Server-Sent Events (SSE)."""
+    conv = db.query(Conversation).filter(Conversation.id == conversation_id, Conversation.user_id == current_user.id).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+        
+    conv_svc = ConversationService(db)
+    conv_svc.add_message(conversation_id, "user", req.message)
+    chat_history = conv_svc.get_recent_messages(conversation_id, limit=6)[:-1]
+
+    rag = RAGService(document_id=conv.document_id)
+
+    def event_generator():
+        for event in rag.answer_stream(req.message, chat_history=chat_history):
+            event_type = event["event"]
+            data = event["data"]
+
+            if event_type == "done":
+                # Persist completed assistant message
+                try:
+                    from app.core.database import SessionLocal
+                    with SessionLocal() as inner_db:
+                        inner_svc = ConversationService(inner_db)
+                        inner_svc.add_message(
+                            conversation_id, 
+                            "assistant", 
+                            data["answer"], 
+                            citations=data.get("sources", [])
+                        )
+                except Exception as save_err:
+                    logger.error(f"Failed to persist streamed assistant message: {save_err}")
+
+            yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

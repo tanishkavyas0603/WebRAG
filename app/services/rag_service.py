@@ -167,6 +167,71 @@ class RAGService:
             response_time_ms=total_ms,
         )
 
+    def answer_stream(self, question: str, chat_history: list[dict[str, str]] = None):
+        """Yield Server-Sent Events (SSE) data for token-by-token streaming."""
+        t_total_start = time.perf_counter()
+        if chat_history is None:
+            chat_history = []
+
+        yield {"event": "status", "data": {"stage": "rewriting_query"}}
+        standalone_question = self._rewrite_query(question, chat_history)
+
+        yield {"event": "status", "data": {"stage": "retrieving_context"}}
+        req_log = RAGRequestLogger(query=question)
+        pipeline = self._retrieve(standalone_question, req_log)
+
+        if not pipeline.chunks:
+            yield {"event": "done", "data": {
+                "answer": "I could not find relevant information in the provided document to answer your question.",
+                "sources": [],
+                "confidence": 0.0,
+                "confidence_label": "Low",
+                "response_time_ms": round((time.perf_counter() - t_total_start) * 1000, 2)
+            }}
+            return
+
+        confidence = ConfidenceService.compute(cosine_scores=pipeline.cosine_scores)
+        truncated_chunks = [
+            chunk.model_copy(update={"content": chunk.content[:_MAX_CHUNK_CHARS]})
+            for chunk in pipeline.chunks
+        ]
+        messages = PromptService.build_messages(question, truncated_chunks, chat_history)
+        sources = _build_sources(pipeline.chunks)
+
+        yield {"event": "status", "data": {"stage": "generating_answer", "sources": [s.model_dump() for s in sources]}}
+
+        call_kwargs = _build_groq_kwargs(settings.GROQ_MODEL, {
+            "model": settings.GROQ_MODEL,
+            "messages": messages,
+            "temperature": 0.2,
+            "max_tokens": 1024,
+            "stream": True,
+        })
+
+        full_answer = []
+        try:
+            stream = self.client.chat.completions.create(**call_kwargs)
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    full_answer.append(delta)
+                    yield {"event": "token", "data": {"delta": delta}}
+        except Exception as e:
+            logger.error(f"[STREAM_ERROR] Streaming failed: {e}")
+            raise LLMError(f"Error streaming response: {e}")
+
+        total_ms = round((time.perf_counter() - t_total_start) * 1000, 2)
+        answer_text = "".join(full_answer).strip()
+        cleaned_answer = re.sub(r'<think>.*?</think>', '', answer_text, flags=re.DOTALL).strip()
+
+        yield {"event": "done", "data": {
+            "answer": cleaned_answer,
+            "sources": [s.model_dump() for s in sources],
+            "confidence": confidence.score,
+            "confidence_label": confidence.label,
+            "response_time_ms": total_ms
+        }}
+
     def _rewrite_query(self, question: str, chat_history: list[dict[str, str]]) -> str:
         if not chat_history:
             return question
