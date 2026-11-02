@@ -7,7 +7,7 @@ from app.api.deps import get_current_user, get_rate_limiter
 from app.models.db import User, Conversation, Document, Message
 from app.models.schemas import ConversationCreate, ConversationResponse, MessageCreate, MessageResponse, Source
 from app.services.conversation_service import ConversationService
-from app.services.rag_service import RAGService, LLMError
+from app.services.rag_service import RAGService, LLMError, RetrievalError
 from urllib.parse import urlparse
 from app.core.logging import get_logger
 import groq
@@ -152,6 +152,12 @@ def send_message(
             logger.warning(f"LLMError in send_message: {e}")
             raise HTTPException(status_code=503, detail=str(e))
 
+        # RetrievalError is raised by our own RAG service for expected
+        # retrieval-pipeline failures (embedding/FAISS/BM25 search errors).
+        if isinstance(e, RetrievalError):
+            logger.warning(f"RetrievalError in send_message: {e}")
+            raise HTTPException(status_code=503, detail=str(e))
+
         # Groq-specific errors (ordered specific → general to avoid swallowing wrong errors)
         if isinstance(e, groq.RateLimitError):
             logger.warning(f"Groq Rate Limit Exceeded: {e}")
@@ -166,5 +172,5 @@ def send_message(
             raise HTTPException(status_code=503, detail="The AI service is temporarily unavailable. Please try again later.")
 
         # Unexpected errors — log full details internally, return generic message to user
-        logger.error(f"Unexpected RAG error: {e}", exc_info=True)
+        logger.exception(f"Unexpected RAG error: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred. Please try again.")

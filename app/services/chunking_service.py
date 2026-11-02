@@ -13,7 +13,6 @@ class ChunkingService:
         self.document = document
 
     def split_paragraphs(self, text: str) -> list[str]:
-        # Split by one or more newlines to handle Trafilatura and BeautifulSoup outputs seamlessly
         paragraphs = [p.strip() for p in re.split(r'\n+', text) if p.strip()]
         return paragraphs
 

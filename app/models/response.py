@@ -1,24 +1,7 @@
-"""
-Response and internal data models for the RAG API.
-
-Model hierarchy:
-  RetrievalResult  — internal, carries all retrieval signals.
-  Source           — public API response; minimal, no raw internals.
-  QueryResponse    — the complete API response object.
-
-WHY cosine_score IS SEPARATE FROM similarity_score:
-  similarity_score is mutable — the metadata ranker overwrites it with
-  the boosted value so downstream sort order reflects the boost.
-  cosine_score is the original FAISS inner-product score and is never
-  modified. It is the only signal suitable for confidence estimation.
-  Mixing the two was the root cause of the broken confidence scores.
-"""
-
 from pydantic import BaseModel, Field
 
 
 class RetrievalResult(BaseModel):
-    """Internal model for a retrieved document chunk."""
 
     chunk_id: int
     title: str

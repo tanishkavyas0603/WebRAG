@@ -35,6 +35,31 @@ logger = get_logger(__name__)
 
 _MAX_CHUNK_CHARS = 1_500
 
+# ------------------------------------------------------------------ #
+# Model-specific parameter guards                                      #
+# reasoning_effort is ONLY supported by Qwen reasoning models on Groq. #
+# Sending it to non-Qwen models (e.g. openai/gpt-oss-120b, llama-*)   #
+# causes HTTP 400, which surfaces to the user as a 503.               #
+# ------------------------------------------------------------------ #
+_REASONING_EFFORT_MODELS = ("qwen",)  # lowercase prefix match
+
+
+def _supports_reasoning_effort(model_id: str) -> bool:
+    """Return True only for models that accept reasoning_effort on Groq."""
+    return any(model_id.lower().startswith(p) for p in _REASONING_EFFORT_MODELS)
+
+
+def _build_groq_kwargs(model_id: str, extra: dict | None = None) -> dict:
+    """Build Groq chat.completions.create kwargs, injecting reasoning_effort
+    only for models that actually support it.  Never mutates the caller's dict."""
+    kwargs: dict = extra.copy() if extra else {}
+    if _supports_reasoning_effort(model_id):
+        kwargs["reasoning_effort"] = "none"
+        logger.debug(f"[GROQ_KWARGS] reasoning_effort=none injected for model={model_id}")
+    else:
+        logger.debug(f"[GROQ_KWARGS] reasoning_effort omitted for model={model_id}")
+    return kwargs
+
 @dataclass
 class _PipelineResult:
     chunks: list[RetrievalResult]
@@ -157,13 +182,17 @@ class RAGService:
         prompt += f"Follow-up Question: {question}\nStandalone Question:"
 
         try:
-            response = self.client.chat.completions.create(
-                model=settings.GROQ_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=128,
-                reasoning_effort="none",
+            call_kwargs = _build_groq_kwargs(settings.GROQ_MODEL, {
+                "model": settings.GROQ_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+                "max_tokens": 128,
+            })
+            logger.info(
+                f"[LLM_START] stage=query_rewrite model={settings.GROQ_MODEL} "
+                f"reasoning_effort={'none' if _supports_reasoning_effort(settings.GROQ_MODEL) else 'omitted'}"
             )
+            response = self.client.chat.completions.create(**call_kwargs)
             raw_response = response.choices[0].message.content.strip()
 
             # Strip <think>...</think> blocks using regex
@@ -192,15 +221,13 @@ class RAGService:
             logger.warning(f"[LLM_FAILURE] stage=query_rewrite reason=rate_limit model={settings.GROQ_MODEL}")
             raise LLMError("The AI service is currently receiving too many requests. Please wait a moment and try again.")
         except APIStatusError as e:
-            # Distinguish configuration errors from transient errors.
-            # 400/404 = bad model ID / deprecated model \u2014 do NOT tell user to retry.
-            # 500/502/503 = Groq outage \u2014 retry message is appropriate.
             status_code = e.status_code if hasattr(e, "status_code") else 0
             if status_code in (400, 404):
                 logger.error(
                     f"[LLM_FAILURE] stage=query_rewrite reason=api_error status={status_code} "
                     f"model={settings.GROQ_MODEL} "
-                    f"hint=Check_GROQ_MODEL_env_var_may_be_deprecated"
+                    f"hint=Check_GROQ_MODEL_env_var_and_reasoning_effort_param_compatibility "
+                    f"reasoning_effort_sent={_supports_reasoning_effort(settings.GROQ_MODEL)}"
                 )
             else:
                 logger.error(
@@ -211,9 +238,21 @@ class RAGService:
         except GroqError as e:
             logger.error(f"[LLM_FAILURE] stage=query_rewrite reason=groq_error type={type(e).__name__} model={settings.GROQ_MODEL}")
             raise LLMError("AI model connection failed. Please try again later.")
+        except Exception:
+            logger.exception(f"[LLM_FAILURE] stage=query_rewrite reason=unexpected model={settings.GROQ_MODEL}")
+            raise LLMError("AI model is currently unavailable or misconfigured. Please try again later.")
 
     def _retrieve(self, question: str, req_log: RAGRequestLogger) -> _PipelineResult:
-        chunks, expanded, cosine_scores = self.retriever.search(question)
+        logger.info(f"[RETRIEVAL_START] question={repr(question[:80])}")
+        try:
+            chunks, expanded, cosine_scores = self.retriever.search(question)
+        except Exception:
+            # Covers embedding/FAISS/BM25 failures surfaced during search().
+            # EmbeddingService already logs its own [EMBEDDING_FAILURE] with
+            # specifics; this is the retrieval-pipeline-level failure log.
+            logger.exception(f"[RETRIEVAL_FAILURE] question={repr(question[:80])}")
+            raise RetrievalError("Document search is currently unavailable. Please try again later.")
+
         req_log.log_expansion(
             expanded=expanded.expanded,
             strategy="abbreviation+synonym" if expanded.was_expanded else "none",
@@ -223,25 +262,27 @@ class RAGService:
             sparse_count=settings.TOP_K * settings.RETRIEVAL_MULTIPLIER,
             after_fusion=len(chunks), final_count=len(chunks), strategy="hybrid_rrf",
         )
+        logger.info(f"[RETRIEVAL_SUCCESS] chunks={len(chunks)}")
         return _PipelineResult(chunks=chunks, query_expanded=expanded.expanded, cosine_scores=cosine_scores)
 
     def _call_llm(self, messages: list[dict[str, str]]) -> str:
+        logger.info(
+            f"[LLM_START] stage=call_llm model={settings.GROQ_MODEL} "
+            f"reasoning_effort={'none' if _supports_reasoning_effort(settings.GROQ_MODEL) else 'omitted'}"
+        )
         try:
-            response = self.client.chat.completions.create(
-                model=settings.GROQ_MODEL,
-                messages=messages,
-                temperature=0,
-                # Kept comfortably under this account's 1000 output-tokens-per-minute
-                # cap on this model \u2014 a request whose max_tokens alone exceeds that
-                # ceiling is rejected outright with HTTP 429, regardless of usage.
-                max_tokens=768,
-                reasoning_effort="none",
-            )
+            call_kwargs = _build_groq_kwargs(settings.GROQ_MODEL, {
+                "model": settings.GROQ_MODEL,
+                "messages": messages,
+                "temperature": 0,
+                "max_tokens": 768,
+            })
+            response = self.client.chat.completions.create(**call_kwargs)
             content = response.choices[0].message.content
             logger.info(f"[DIAGNOSTICS] raw Groq content exact value: {repr(content)}")
 
             if content is None:
-                logger.error("[LLM_FAILURE] stage=call_llm reason=none_content model={settings.GROQ_MODEL}")
+                logger.error(f"[LLM_FAILURE] stage=call_llm reason=none_content model={settings.GROQ_MODEL}")
                 raise LLMError("The AI service returned an empty response. Please try again.")
 
             # Strip <think>...</think> blocks (robust approach)
@@ -254,9 +295,10 @@ class RAGService:
             # BUG-02 FIX: Guard against empty response after stripping.
             # Without this, an empty string reaches the frontend as a blank message bubble.
             if not content:
-                logger.warning("[LLM_FAILURE] stage=call_llm reason=empty_after_strip model={settings.GROQ_MODEL}")
+                logger.warning(f"[LLM_FAILURE] stage=call_llm reason=empty_after_strip model={settings.GROQ_MODEL}")
                 return "I was unable to generate a response. Please try rephrasing your question."
 
+            logger.info(f"[LLM_SUCCESS] stage=call_llm response_chars={len(content)}")
             return content
         except LLMError:
             raise  # re-raise without wrapping
@@ -269,7 +311,8 @@ class RAGService:
                 logger.error(
                     f"[LLM_FAILURE] stage=call_llm reason=api_error status={status_code} "
                     f"model={settings.GROQ_MODEL} "
-                    f"hint=Check_GROQ_MODEL_env_var_may_be_deprecated"
+                    f"hint=Check_GROQ_MODEL_env_var_and_reasoning_effort_param_compatibility "
+                    f"reasoning_effort_sent={_supports_reasoning_effort(settings.GROQ_MODEL)}"
                 )
             else:
                 logger.error(
@@ -280,3 +323,6 @@ class RAGService:
         except GroqError as e:
             logger.error(f"[LLM_FAILURE] stage=call_llm reason=groq_error type={type(e).__name__} model={settings.GROQ_MODEL}")
             raise LLMError("AI model connection failed. Please try again later.")
+        except Exception:
+            logger.exception(f"[LLM_FAILURE] stage=call_llm reason=unexpected model={settings.GROQ_MODEL}")
+            raise LLMError("AI model is currently unavailable or misconfigured. Please try again later.")

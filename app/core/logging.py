@@ -1,16 +1,3 @@
-"""
-Structured logging for the Health RAG system.
-
-Design decisions:
-- One-time root logger configuration via configure_logging().
-  Calling basicConfig() inside get_logger() is an anti-pattern: it no-ops
-  after the first call, making log-level changes unpredictable.
-- A RAGRequestLogger helper wraps per-request structured events.
-  This mirrors the pattern used in production observability stacks
-  (Datadog, Google Cloud Logging) where every log line carries a
-  trace/request ID so you can reconstruct the full journey of a query.
-"""
-
 import logging
 import sys
 import uuid
@@ -48,10 +35,6 @@ def get_logger(name: str) -> logging.Logger:
     configure_logging()
     return logging.getLogger(name)
 
-
-# --------------------------------------------------------------------------- #
-# Per-request structured logger                                                #
-# --------------------------------------------------------------------------- #
 
 @dataclass
 class RAGRequestLogger:

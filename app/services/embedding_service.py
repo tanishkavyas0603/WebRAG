@@ -19,6 +19,22 @@ class EmbeddingService:
             "Authorization": f"Bearer {settings.HF_TOKEN}"
         }
 
+    def _generate_embeddings_local(self, texts):
+        try:
+            logger.info(f"[EMBEDDING] Generating embeddings locally via FastEmbed for {len(texts)} texts...")
+            from fastembed import TextEmbedding
+            model = TextEmbedding(self.model)
+            embeddings = list(model.embed(texts))
+            arr = np.array(embeddings, dtype=np.float32)
+            if len(arr) > 0 and len(arr.shape) == 2:
+                norms = np.linalg.norm(arr, axis=1, keepdims=True)
+                arr = np.where(norms > 0, arr / norms, arr)
+            logger.info(f"[EMBEDDING_SUCCESS] Local FastEmbed generated {len(arr)} vectors")
+            return arr
+        except Exception as e:
+            logger.error(f"[EMBEDDING_FAILURE] Local FastEmbed fallback failed: {e}")
+            raise RuntimeError(f"Local embedding generation failed: {e}")
+
     def generate_embeddings(self, chunks):
         texts = []
         for chunk in chunks:
@@ -58,6 +74,13 @@ class EmbeddingService:
                             embeddings.extend(batch_embeddings)
                             logger.info(f"[EMBEDDING_SUCCESS] batch={batch_index}/{total_batches} vectors={len(batch_embeddings)}")
                             break
+                            
+                        elif response.status_code == 402:
+                            logger.warning(
+                                "[EMBEDDING] Hugging Face returned HTTP 402 (credit limit reached). "
+                                "Falling back to local FastEmbed embedding generation."
+                            )
+                            return self._generate_embeddings_local(texts)
                             
                         elif response.status_code in (401, 403):
                             logger.error(
